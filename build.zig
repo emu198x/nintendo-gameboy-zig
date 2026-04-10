@@ -11,16 +11,19 @@ pub fn build(b: *std.Build) void {
     });
 
     // Executable
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "dmg", .module = lib },
+        },
+    });
+    exe_module.linkSystemLibrary("SDL3", .{});
+
     const exe = b.addExecutable(.{
         .name = "dmg",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "dmg", .module = lib },
-            },
-        }),
+        .root_module = exe_module,
     });
 
     b.installArtifact(exe);
