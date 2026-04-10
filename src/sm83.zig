@@ -20,6 +20,11 @@ pub const SM83 = struct {
     w: u8 = 0, // internal temp (high byte)
     halted: bool = false,
 
+    pub const flag_z: u8 = 0x80;
+    pub const flag_n: u8 = 0x40;
+    pub const flag_h: u8 = 0x20;
+    pub const flag_c: u8 = 0x10;
+
     /// Execute one M-cycle.
     pub fn tick(self: *SM83, bus: anytype) void {
         if (self.halted) return;
@@ -195,6 +200,111 @@ pub const SM83 = struct {
                 else => unreachable,
             },
 
+            // INC r / DEC r — 8-bit register (1M)
+            0x04, 0x05, 0x0C, 0x0D, 0x14, 0x15, 0x1C, 0x1D,
+            0x24, 0x25, 0x2C, 0x2D, 0x3C, 0x3D,
+            => {
+                const reg: u3 = @truncate(self.opcode >> 3);
+                const val = self.getReg8(reg);
+                const is_dec = self.opcode & 1 != 0;
+                const result = if (is_dec) val -% 1 else val +% 1;
+                self.setReg8(reg, result);
+
+                self.f = self.f & flag_c; // preserve carry
+                if (result == 0) self.f |= flag_z;
+                if (is_dec) {
+                    self.f |= flag_n;
+                    if (val & 0xF == 0) self.f |= flag_h;
+                } else {
+                    if (val & 0xF == 0xF) self.f |= flag_h;
+                }
+            },
+
+            // INC (HL) / DEC (HL) — read-modify-write (3M)
+            0x34, 0x35 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.hl());
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    const is_dec = self.opcode & 1 != 0;
+                    const result = if (is_dec) self.z -% 1 else self.z +% 1;
+                    bus.write(self.hl(), result);
+
+                    self.f = self.f & flag_c;
+                    if (result == 0) self.f |= flag_z;
+                    if (is_dec) {
+                        self.f |= flag_n;
+                        if (self.z & 0xF == 0) self.f |= flag_h;
+                    } else {
+                        if (self.z & 0xF == 0xF) self.f |= flag_h;
+                    }
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // INC rr / DEC rr — 16-bit register pair (2M, no flags)
+            0x03, 0x13, 0x23, 0x33, 0x0B, 0x1B, 0x2B, 0x3B => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    const pair: u2 = @truncate(self.opcode >> 4);
+                    const val = self.getReg16(pair);
+                    self.setReg16(pair, if (self.opcode & 0x08 != 0) val -% 1 else val +% 1);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // ALU A, r — register operand (1M) / ALU A, (HL) — memory operand (2M)
+            0x80...0xBF => {
+                const op: u3 = @truncate(self.opcode >> 3);
+                const src: u3 = @truncate(self.opcode);
+
+                if (src == 6) {
+                    // ALU A, (HL) — 2M
+                    switch (self.m_cycle) {
+                        0 => {
+                            self.m_cycle = 1;
+                        },
+                        1 => {
+                            self.aluOp(op, bus.read(self.hl()));
+                            self.m_cycle = 0;
+                        },
+                        else => unreachable,
+                    }
+                } else {
+                    self.aluOp(op, self.getReg8(src));
+                }
+            },
+
+            // ALU A, d8 — immediate operand (2M)
+            0xC6, 0xCE, 0xD6, 0xDE, 0xE6, 0xEE, 0xF6, 0xFE => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    const op: u3 = @truncate(self.opcode >> 3);
+                    self.aluOp(op, bus.read(self.pc));
+                    self.pc +%= 1;
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // RLA — rotate A left through carry (1M)
+            0x17 => {
+                const old_carry: u8 = if (self.f & flag_c != 0) 1 else 0;
+                const new_carry = self.a & 0x80;
+                self.a = (self.a << 1) | old_carry;
+                self.f = if (new_carry != 0) flag_c else 0;
+            },
+
             else => {
                 self.halted = true;
             },
@@ -202,6 +312,56 @@ pub const SM83 = struct {
     }
 
     // -- Helpers --------------------------------------------------------
+
+    fn aluOp(self: *SM83, op: u3, operand: u8) void {
+        switch (op) {
+            0 => self.addA(operand, false),
+            1 => self.addA(operand, true),
+            2 => self.subA(operand, false, true),
+            3 => self.subA(operand, true, true),
+            4 => { // AND
+                self.a &= operand;
+                self.f = flag_h | (if (self.a == 0) flag_z else @as(u8, 0));
+            },
+            5 => { // XOR
+                self.a ^= operand;
+                self.f = if (self.a == 0) flag_z else 0;
+            },
+            6 => { // OR
+                self.a |= operand;
+                self.f = if (self.a == 0) flag_z else 0;
+            },
+            7 => self.subA(operand, false, false), // CP (flags only)
+        }
+    }
+
+    fn addA(self: *SM83, operand: u8, with_carry: bool) void {
+        const carry: u16 = if (with_carry and self.f & flag_c != 0) 1 else 0;
+        const a: u16 = self.a;
+        const b: u16 = operand;
+        const result = a + b + carry;
+        const half = (a & 0xF) + (b & 0xF) + carry;
+
+        self.f = 0;
+        if (@as(u8, @truncate(result)) == 0) self.f |= flag_z;
+        if (half > 0xF) self.f |= flag_h;
+        if (result > 0xFF) self.f |= flag_c;
+        self.a = @truncate(result);
+    }
+
+    fn subA(self: *SM83, operand: u8, with_carry: bool, store: bool) void {
+        const carry: u16 = if (with_carry and self.f & flag_c != 0) 1 else 0;
+        const a: u16 = self.a;
+        const b: u16 = operand;
+        const result = a -% b -% carry;
+        const half = (a & 0xF) -% (b & 0xF) -% carry;
+
+        self.f = flag_n;
+        if (@as(u8, @truncate(result)) == 0) self.f |= flag_z;
+        if (half & 0x10 != 0) self.f |= flag_h;
+        if (result & 0x100 != 0) self.f |= flag_c;
+        if (store) self.a = @truncate(result);
+    }
 
     fn getReg8(self: *const SM83, reg: u3) u8 {
         return switch (reg) {
@@ -508,6 +668,143 @@ test "LD (FF00+C), A writes to IO region" {
     cpu.tick(&bus);
     cpu.tick(&bus);
     try std.testing.expectEqual(@as(u8, 0x80), ram[0xFF11]);
+}
+
+test "XOR A clears A and sets zero flag" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xAF; // XOR A
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.a = 0x42;
+
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0), cpu.a);
+    try std.testing.expect(cpu.f & SM83.flag_z != 0);
+    try std.testing.expect(cpu.f & SM83.flag_n == 0);
+    try std.testing.expect(cpu.f & SM83.flag_h == 0);
+    try std.testing.expect(cpu.f & SM83.flag_c == 0);
+}
+
+test "INC C sets half-carry on nibble overflow" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x0C; // INC C
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.c = 0x0F;
+
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x10), cpu.c);
+    try std.testing.expect(cpu.f & SM83.flag_h != 0);
+    try std.testing.expect(cpu.f & SM83.flag_n == 0);
+}
+
+test "DEC B sets half-carry on nibble borrow" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x05; // DEC B
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.b = 0x10;
+
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x0F), cpu.b);
+    try std.testing.expect(cpu.f & SM83.flag_h != 0);
+    try std.testing.expect(cpu.f & SM83.flag_n != 0);
+}
+
+test "DEC B to zero sets zero flag" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x05; // DEC B
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.b = 0x01;
+
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0), cpu.b);
+    try std.testing.expect(cpu.f & SM83.flag_z != 0);
+}
+
+test "INC/DEC preserves carry flag" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x0C; // INC C
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.f = SM83.flag_c; // carry set before INC
+
+    cpu.tick(&bus);
+    try std.testing.expect(cpu.f & SM83.flag_c != 0); // carry preserved
+}
+
+test "CP d8 sets flags without modifying A" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xFE; // CP $42
+    ram[1] = 0x42;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.a = 0x42;
+
+    cpu.tick(&bus);
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x42), cpu.a); // unchanged
+    try std.testing.expect(cpu.f & SM83.flag_z != 0); // equal
+    try std.testing.expect(cpu.f & SM83.flag_n != 0); // subtraction
+}
+
+test "INC HL is 2M and no flags" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x23; // INC HL
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0xFF;
+    cpu.f = 0;
+
+    cpu.tick(&bus);
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x81), cpu.h);
+    try std.testing.expectEqual(@as(u8, 0x00), cpu.l);
+    try std.testing.expectEqual(@as(u8, 0), cpu.f); // no flags changed
+}
+
+test "RLA rotates through carry" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x17; // RLA
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.a = 0x80; // bit 7 set
+    cpu.f = 0; // carry clear
+
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x00), cpu.a); // 0x80 << 1, no carry in
+    try std.testing.expect(cpu.f & SM83.flag_c != 0); // old bit 7 → carry
+    try std.testing.expect(cpu.f & SM83.flag_z == 0); // RLA never sets Z
+}
+
+test "RLA carries in old carry" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x17; // RLA
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.a = 0x00;
+    cpu.f = SM83.flag_c; // carry set
+
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x01), cpu.a); // carry rotated into bit 0
+    try std.testing.expect(cpu.f & SM83.flag_c == 0); // old bit 7 was 0
+}
+
+test "AND d8 sets half-carry flag" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xE6; // AND $0F
+    ram[1] = 0x0F;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.a = 0xF0;
+
+    cpu.tick(&bus);
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x00), cpu.a);
+    try std.testing.expect(cpu.f & SM83.flag_z != 0);
+    try std.testing.expect(cpu.f & SM83.flag_h != 0); // AND always sets H
 }
 
 test "multi-M-cycle instruction followed by NOP" {
