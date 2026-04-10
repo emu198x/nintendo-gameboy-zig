@@ -19,6 +19,7 @@ pub const SM83 = struct {
     z: u8 = 0, // internal temp (low byte)
     w: u8 = 0, // internal temp (high byte)
     halted: bool = false,
+    ime: bool = false, // interrupt master enable
 
     pub const flag_z: u8 = 0x80;
     pub const flag_n: u8 = 0x40;
@@ -40,6 +41,23 @@ pub const SM83 = struct {
     fn execute(self: *SM83, bus: anytype) void {
         switch (self.opcode) {
             0x00 => {}, // NOP
+
+            // LD (HL), d8 — load immediate into memory (3M)
+            0x36 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    bus.write(self.hl(), self.z);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
 
             // LD r, d8 — load immediate into register (2M)
             0x06, 0x0E, 0x16, 0x1E, 0x26, 0x2E, 0x3E => switch (self.m_cycle) {
@@ -107,6 +125,19 @@ pub const SM83 = struct {
                     // LD r, r — register to register (1M)
                     self.setReg8(dst, self.getReg8(src));
                 }
+            },
+
+            // LD (BC), A / LD (DE), A — write A to register pair address (2M)
+            0x02, 0x12 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    const pair: u2 = @truncate(self.opcode >> 4);
+                    bus.write(self.getReg16(pair), self.a);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
             },
 
             // LD A, (BC) / LD A, (DE) — read from register pair address (2M)
@@ -341,12 +372,311 @@ pub const SM83 = struct {
                 else => unreachable,
             },
 
-            // RLA — rotate A left through carry (1M)
-            0x17 => {
+            // DI — disable interrupts (1M)
+            0xF3 => {
+                self.ime = false;
+            },
+
+            // EI — enable interrupts (1M, takes effect after next instruction)
+            // TODO: delayed enable (IME set after the following instruction)
+            0xFB => {
+                self.ime = true;
+            },
+
+            // CPL — complement A (1M)
+            0x2F => {
+                self.a = ~self.a;
+                self.f = (self.f & (flag_z | flag_c)) | flag_n | flag_h;
+            },
+
+            // SCF — set carry flag (1M)
+            0x37 => {
+                self.f = (self.f & flag_z) | flag_c;
+            },
+
+            // CCF — complement carry flag (1M)
+            0x3F => {
+                self.f = (self.f & flag_z) ^ flag_c;
+            },
+
+            // JP (HL) — jump to address in HL (1M)
+            0xE9 => {
+                self.pc = self.hl();
+            },
+
+            // LD SP, HL (2M)
+            0xF9 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.sp = self.hl();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // RETI — return from interrupt (4M)
+            0xD9 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    self.pc = self.wz();
+                    self.ime = true;
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // RET cc — conditional return (2M not taken, 5M taken)
+            0xC0, 0xC8, 0xD0, 0xD8 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    // Internal: evaluate condition
+                    if (self.condMet()) {
+                        self.m_cycle = 2;
+                    } else {
+                        self.m_cycle = 0;
+                    }
+                },
+                2 => {
+                    self.z = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    self.w = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 4;
+                },
+                4 => {
+                    self.pc = self.wz();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // JP cc, a16 — conditional absolute jump (3M not taken, 4M taken)
+            0xC2, 0xCA, 0xD2, 0xDA => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    if (self.condMet()) {
+                        self.m_cycle = 3;
+                    } else {
+                        self.m_cycle = 0;
+                    }
+                },
+                3 => {
+                    self.pc = self.wz();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // CALL cc, a16 — conditional call (3M not taken, 6M taken)
+            0xC4, 0xCC, 0xD4, 0xDC => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    if (self.condMet()) {
+                        self.m_cycle = 3;
+                    } else {
+                        self.m_cycle = 0;
+                    }
+                },
+                3 => {
+                    self.sp -%= 1;
+                    self.m_cycle = 4;
+                },
+                4 => {
+                    bus.write(self.sp, @intCast(self.pc >> 8));
+                    self.sp -%= 1;
+                    self.m_cycle = 5;
+                },
+                5 => {
+                    bus.write(self.sp, @truncate(self.pc));
+                    self.pc = self.wz();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // RST n — restart (push PC, jump to fixed address) (4M)
+            0xC7, 0xCF, 0xD7, 0xDF, 0xE7, 0xEF, 0xF7, 0xFF => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.sp -%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    bus.write(self.sp, @intCast(self.pc >> 8));
+                    self.sp -%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    bus.write(self.sp, @truncate(self.pc));
+                    self.pc = @as(u16, self.opcode & 0x38);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // ADD SP, r8 — add signed immediate to SP (4M)
+            0xE8 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    // Internal: compute result
+                    const offset: i8 = @bitCast(self.z);
+                    const sp = self.sp;
+                    const result = @as(u16, @bitCast(@as(i16, @bitCast(sp)) +% @as(i16, offset)));
+
+                    self.f = 0;
+                    if ((sp & 0xF) + (self.z & 0xF) > 0xF) self.f |= flag_h;
+                    if ((sp & 0xFF) +% @as(u16, self.z) > 0xFF) self.f |= flag_c;
+                    _ = result;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    const offset: i8 = @bitCast(self.z);
+                    self.sp = @bitCast(@as(i16, @bitCast(self.sp)) +% @as(i16, offset));
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // LD HL, SP+r8 — load SP + signed immediate into HL (3M)
+            0xF8 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    const offset: i8 = @bitCast(self.z);
+                    const sp = self.sp;
+                    const result = @as(u16, @bitCast(@as(i16, @bitCast(sp)) +% @as(i16, offset)));
+
+                    self.f = 0;
+                    if ((sp & 0xF) + (self.z & 0xF) > 0xF) self.f |= flag_h;
+                    if ((sp & 0xFF) +% @as(u16, self.z) > 0xFF) self.f |= flag_c;
+
+                    self.h = @intCast(result >> 8);
+                    self.l = @intCast(result & 0xFF);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // RLCA / RRCA / RLA / RRA — rotate A (1M, Z always cleared)
+            0x07 => { // RLCA
+                const bit7 = self.a >> 7;
+                self.a = (self.a << 1) | bit7;
+                self.f = if (bit7 != 0) flag_c else @as(u8, 0);
+            },
+            0x0F => { // RRCA
+                const bit0 = self.a & 1;
+                self.a = (self.a >> 1) | (bit0 << 7);
+                self.f = if (bit0 != 0) flag_c else @as(u8, 0);
+            },
+            0x17 => { // RLA
                 const old_carry: u8 = if (self.f & flag_c != 0) 1 else 0;
                 const new_carry = self.a & 0x80;
                 self.a = (self.a << 1) | old_carry;
-                self.f = if (new_carry != 0) flag_c else 0;
+                self.f = if (new_carry != 0) flag_c else @as(u8, 0);
+            },
+            0x1F => { // RRA
+                const old_carry: u8 = if (self.f & flag_c != 0) 0x80 else 0;
+                const new_carry = self.a & 1;
+                self.a = (self.a >> 1) | old_carry;
+                self.f = if (new_carry != 0) flag_c else @as(u8, 0);
+            },
+
+            // DAA — decimal adjust A for BCD (1M)
+            0x27 => {
+                var adjust: u8 = 0;
+                var carry = false;
+
+                if (self.f & flag_h != 0 or (self.f & flag_n == 0 and self.a & 0x0F > 9)) {
+                    adjust |= 0x06;
+                }
+                if (self.f & flag_c != 0 or (self.f & flag_n == 0 and self.a > 0x99)) {
+                    adjust |= 0x60;
+                    carry = true;
+                }
+
+                if (self.f & flag_n != 0) {
+                    self.a -%= adjust;
+                } else {
+                    self.a +%= adjust;
+                }
+
+                self.f = (self.f & flag_n) | (if (carry) flag_c else @as(u8, 0));
+                if (self.a == 0) self.f |= flag_z;
+            },
+
+            // ADD HL, rr — 16-bit addition (2M)
+            0x09, 0x19, 0x29, 0x39 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    const pair: u2 = @truncate(self.opcode >> 4);
+                    const hl_val: u32 = self.hl();
+                    const rr_val: u32 = self.getReg16(pair);
+                    const result = hl_val + rr_val;
+
+                    self.f = self.f & flag_z; // preserve Z
+                    if ((hl_val & 0xFFF) + (rr_val & 0xFFF) > 0xFFF) self.f |= flag_h;
+                    if (result > 0xFFFF) self.f |= flag_c;
+
+                    const r16: u16 = @truncate(result);
+                    self.h = @intCast(r16 >> 8);
+                    self.l = @intCast(r16 & 0xFF);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
             },
 
             // JR r8 — unconditional relative jump (3M)
@@ -639,28 +969,66 @@ pub const SM83 = struct {
 
         const val = self.getReg8(reg);
 
-        if (cb_op >= 0x40 and cb_op <= 0x7F) {
-            // BIT b, r — test bit (2M total for register)
-            self.f = (self.f & flag_c) | flag_h;
-            if (val & (@as(u8, 1) << bit) == 0) self.f |= flag_z;
-            self.m_cycle = 0;
-        } else if (cb_op >= 0x00 and cb_op <= 0x07) {
-            // RLC r — rotate left circular
-            const result = (val << 1) | (val >> 7);
-            self.setReg8(reg, result);
-            self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
-            if (result == 0) self.f |= flag_z;
-            self.m_cycle = 0;
-        } else if (cb_op >= 0x10 and cb_op <= 0x17) {
-            // RL r — rotate left through carry
-            const carry: u8 = if (self.f & flag_c != 0) 1 else 0;
-            const result = (val << 1) | carry;
-            self.setReg8(reg, result);
-            self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
-            if (result == 0) self.f |= flag_z;
-            self.m_cycle = 0;
-        } else {
-            self.halted = true;
+        switch (@as(u2, @truncate(cb_op >> 6))) {
+            0 => {
+                // Rotate/shift operations (0x00-0x3F)
+                const op: u3 = @truncate(cb_op >> 3);
+                const result = switch (op) {
+                    0 => rlc: { // RLC
+                        self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+                        break :rlc (val << 1) | (val >> 7);
+                    },
+                    1 => rrc: { // RRC
+                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                        break :rrc (val >> 1) | (val << 7);
+                    },
+                    2 => rl: { // RL
+                        const carry: u8 = if (self.f & flag_c != 0) 1 else 0;
+                        self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+                        break :rl (val << 1) | carry;
+                    },
+                    3 => rr: { // RR
+                        const carry: u8 = if (self.f & flag_c != 0) 0x80 else 0;
+                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                        break :rr (val >> 1) | carry;
+                    },
+                    4 => sla: { // SLA
+                        self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+                        break :sla val << 1;
+                    },
+                    5 => sra: { // SRA (arithmetic — bit 7 preserved)
+                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                        break :sra (val >> 1) | (val & 0x80);
+                    },
+                    6 => swap: { // SWAP
+                        self.f = 0;
+                        break :swap (val >> 4) | (val << 4);
+                    },
+                    7 => srl: { // SRL
+                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                        break :srl val >> 1;
+                    },
+                };
+                if (result == 0) self.f |= flag_z;
+                self.setReg8(reg, result);
+                self.m_cycle = 0;
+            },
+            1 => {
+                // BIT b, r (0x40-0x7F)
+                self.f = (self.f & flag_c) | flag_h;
+                if (val & (@as(u8, 1) << bit) == 0) self.f |= flag_z;
+                self.m_cycle = 0;
+            },
+            2 => {
+                // RES b, r (0x80-0xBF)
+                self.setReg8(reg, val & ~(@as(u8, 1) << bit));
+                self.m_cycle = 0;
+            },
+            3 => {
+                // SET b, r (0xC0-0xFF)
+                self.setReg8(reg, val | (@as(u8, 1) << bit));
+                self.m_cycle = 0;
+            },
         }
     }
 
