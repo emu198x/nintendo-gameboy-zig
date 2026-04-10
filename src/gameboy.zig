@@ -18,7 +18,7 @@ pub const GameBoy = struct {
     /// Timer ticks every T-cycle. CPU ticks every 4th (M-cycle).
     pub fn tick(self: *GameBoy) void {
         self.timer.tick();
-        self.ppu.tick();
+        self.ppu.tick(self.ram[0x8000..0xA000]);
 
         if (self.cpu_divider == 0) {
             self.cpu.tick(self);
@@ -47,8 +47,13 @@ pub const GameBoy = struct {
             0xFF05 => self.timer.tima,
             0xFF06 => self.timer.tma,
             0xFF07 => self.timer.readTac(),
+            0xFF40 => self.ppu.lcdc,
             0xFF41 => self.ppu.readStat(),
+            0xFF42 => self.ppu.scy,
+            0xFF43 => self.ppu.scx,
             0xFF44 => self.ppu.ly,
+            0xFF45 => self.ppu.lyc,
+            0xFF47 => self.ppu.bgp,
             else => self.ram[addr],
         };
     }
@@ -63,6 +68,24 @@ pub const GameBoy = struct {
                 self.timer.tma = value;
             },
             0xFF07 => self.timer.writeTac(value),
+            0xFF40 => {
+                self.ppu.lcdc = value;
+            },
+            0xFF41 => {
+                self.ppu.stat = value & 0x78; // only bits 3-6 writable
+            },
+            0xFF42 => {
+                self.ppu.scy = value;
+            },
+            0xFF43 => {
+                self.ppu.scx = value;
+            },
+            0xFF45 => {
+                self.ppu.lyc = value;
+            },
+            0xFF47 => {
+                self.ppu.bgp = value;
+            },
             0xFF50 => {
                 if (value != 0) self.boot_rom_active = false;
             },
