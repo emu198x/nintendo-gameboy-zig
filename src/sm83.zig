@@ -20,6 +20,7 @@ pub const SM83 = struct {
     w: u8 = 0, // internal temp (high byte)
     halted: bool = false,
     ime: bool = false, // interrupt master enable
+    ime_pending: bool = false, // EI delays by one instruction
 
     pub const flag_z: u8 = 0x80;
     pub const flag_n: u8 = 0x40;
@@ -31,6 +32,11 @@ pub const SM83 = struct {
         if (self.halted) return;
 
         if (self.m_cycle == 0) {
+            // EI takes effect after the instruction following it
+            if (self.ime_pending) {
+                self.ime_pending = false;
+                self.ime = true;
+            }
             self.opcode = bus.read(self.pc);
             self.pc +%= 1;
         }
@@ -378,9 +384,8 @@ pub const SM83 = struct {
             },
 
             // EI — enable interrupts (1M, takes effect after next instruction)
-            // TODO: delayed enable (IME set after the following instruction)
             0xFB => {
-                self.ime = true;
+                self.ime_pending = true;
             },
 
             // CPL — complement A (1M)

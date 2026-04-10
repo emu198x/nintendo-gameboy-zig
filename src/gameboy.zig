@@ -69,6 +69,11 @@ pub const GameBoy = struct {
             },
             0xFF07 => self.timer.writeTac(value),
             0xFF40 => {
+                // LCD disable: reset PPU timing
+                if (self.ppu.lcdc & 0x80 != 0 and value & 0x80 == 0) {
+                    self.ppu.ly = 0;
+                    self.ppu.dot = 0;
+                }
                 self.ppu.lcdc = value;
             },
             0xFF41 => {

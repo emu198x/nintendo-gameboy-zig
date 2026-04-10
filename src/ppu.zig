@@ -138,56 +138,50 @@ pub const PPU = struct {
 
     /// Advance the PPU by one T-cycle.
     pub fn tick(self: *PPU, vram: []const u8) void {
-        // Always advance timing, even if LCD is off (simplified)
-        defer {
-            self.dot += 1;
-            if (self.dot >= dots_per_line) {
-                self.dot = 0;
-                self.ly +%= 1;
-                if (self.ly >= lines_per_frame) {
-                    self.ly = 0;
-                }
-            }
-        }
-
-        if (self.lcdc & 0x80 == 0) return; // LCD disabled — no rendering
+        if (self.lcdc & 0x80 == 0) return; // LCD off: timing frozen
 
         if (self.ly >= vblank_start) {
             // Mode 1: VBLANK
             if (self.ly == vblank_start and self.dot == 0) {
                 self.frame_ready = true;
             }
-            return;
-        }
-
-        if (self.dot < oam_end) {
+        } else if (self.dot < oam_end) {
             // Mode 2: OAM scan — no-op for now (no sprites)
-            return;
-        }
+        } else {
+            if (self.dot == oam_end) {
+                // Entering mode 3: reset pixel pipeline
+                self.fetcher.reset();
+                self.fifo.clear();
+                self.lcd_x = 0;
+                self.discard_pixels = self.scx & 7;
+            }
 
-        if (self.dot == oam_end) {
-            // Entering mode 3: reset pixel pipeline
-            self.fetcher.reset();
-            self.fifo.clear();
-            self.lcd_x = 0;
-            self.discard_pixels = self.scx & 7;
-        }
+            if (self.lcd_x < 160) {
+                // Mode 3: pixel transfer
+                self.fetcher.tick(self, vram);
 
-        if (self.lcd_x < 160) {
-            // Mode 3: pixel transfer
-            self.fetcher.tick(self, vram);
-
-            if (self.fifo.len > 0) {
-                const pixel = self.fifo.pop();
-                if (self.discard_pixels > 0) {
-                    self.discard_pixels -= 1;
-                } else {
-                    self.framebuffer[self.ly][self.lcd_x] = pixel;
-                    self.lcd_x += 1;
+                if (self.fifo.len > 0) {
+                    const pixel = self.fifo.pop();
+                    if (self.discard_pixels > 0) {
+                        self.discard_pixels -= 1;
+                    } else {
+                        self.framebuffer[self.ly][self.lcd_x] = pixel;
+                        self.lcd_x += 1;
+                    }
                 }
             }
+            // else: Mode 0 (HBLANK) — idle
         }
-        // else: Mode 0 (HBLANK) — idle until end of scanline
+
+        // Advance timing (always when LCD is on)
+        self.dot += 1;
+        if (self.dot >= dots_per_line) {
+            self.dot = 0;
+            self.ly +%= 1;
+            if (self.ly >= lines_per_frame) {
+                self.ly = 0;
+            }
+        }
     }
 
     /// Current PPU mode.
