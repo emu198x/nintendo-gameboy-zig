@@ -305,6 +305,180 @@ pub const SM83 = struct {
                 self.f = if (new_carry != 0) flag_c else 0;
             },
 
+            // JR r8 — unconditional relative jump (3M)
+            0x18 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    // Internal cycle: apply signed offset
+                    const offset: i8 = @bitCast(self.z);
+                    self.pc = @bitCast(@as(i16, @bitCast(self.pc)) +% offset);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // JR cc, r8 — conditional relative jump (2M not taken, 3M taken)
+            0x20, 0x28, 0x30, 0x38 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    if (self.condMet()) {
+                        self.m_cycle = 2; // branch taken: internal cycle
+                    } else {
+                        self.m_cycle = 0; // not taken: done
+                    }
+                },
+                2 => {
+                    const offset: i8 = @bitCast(self.z);
+                    self.pc = @bitCast(@as(i16, @bitCast(self.pc)) +% offset);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // JP a16 — unconditional absolute jump (4M)
+            0xC3 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    self.pc = self.wz();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // CALL a16 — call subroutine (6M)
+            0xCD => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    // Internal: prepare to push return address
+                    self.sp -%= 1;
+                    self.m_cycle = 4;
+                },
+                4 => {
+                    bus.write(self.sp, @intCast(self.pc >> 8));
+                    self.sp -%= 1;
+                    self.m_cycle = 5;
+                },
+                5 => {
+                    bus.write(self.sp, @truncate(self.pc));
+                    self.pc = self.wz();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // RET — return from subroutine (4M)
+            0xC9 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    self.pc = self.wz();
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // PUSH rr — push register pair to stack (4M)
+            0xC5, 0xD5, 0xE5, 0xF5 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    // Internal cycle
+                    self.sp -%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    const pair = self.pushPopPair();
+                    bus.write(self.sp, @intCast(pair >> 8));
+                    self.sp -%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    const pair = self.pushPopPair();
+                    bus.write(self.sp, @truncate(pair));
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // POP rr — pop register pair from stack (3M)
+            0xC1, 0xD1, 0xE1, 0xF1 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.sp);
+                    self.sp +%= 1;
+                    self.setPushPopPair(self.wz());
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // CB prefix — two-byte instructions (2M+ depending on operand)
+            0xCB => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    const cb_op = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.executeCB(cb_op);
+                },
+                else => unreachable,
+            },
+
             else => {
                 self.halted = true;
             },
@@ -361,6 +535,89 @@ pub const SM83 = struct {
         if (half & 0x10 != 0) self.f |= flag_h;
         if (result & 0x100 != 0) self.f |= flag_c;
         if (store) self.a = @truncate(result);
+    }
+
+    /// Check if the condition encoded in bits 4-3 of the opcode is met.
+    fn condMet(self: *const SM83) bool {
+        return switch (@as(u2, @truncate(self.opcode >> 3))) {
+            0 => self.f & flag_z == 0, // NZ
+            1 => self.f & flag_z != 0, // Z
+            2 => self.f & flag_c == 0, // NC
+            3 => self.f & flag_c != 0, // C
+        };
+    }
+
+    /// Get the 16-bit value of the register pair for PUSH/POP.
+    /// PUSH/POP use AF instead of SP for pair index 3.
+    fn pushPopPair(self: *const SM83) u16 {
+        return switch (@as(u2, @truncate(self.opcode >> 4))) {
+            0 => (@as(u16, self.b) << 8) | self.c,
+            1 => (@as(u16, self.d) << 8) | self.e,
+            2 => (@as(u16, self.h) << 8) | self.l,
+            3 => (@as(u16, self.a) << 8) | self.f,
+        };
+    }
+
+    fn setPushPopPair(self: *SM83, value: u16) void {
+        const high: u8 = @intCast(value >> 8);
+        const low: u8 = @truncate(value);
+        switch (@as(u2, @truncate(self.opcode >> 4))) {
+            0 => {
+                self.b = high;
+                self.c = low;
+            },
+            1 => {
+                self.d = high;
+                self.e = low;
+            },
+            2 => {
+                self.h = high;
+                self.l = low;
+            },
+            3 => {
+                self.a = high;
+                self.f = low & 0xF0; // lower 4 bits of F always 0
+            },
+        }
+    }
+
+    /// Execute a CB-prefixed instruction. Called during M-cycle 1.
+    fn executeCB(self: *SM83, cb_op: u8) void {
+        const reg: u3 = @truncate(cb_op);
+        const bit: u3 = @truncate(cb_op >> 3);
+
+        if (reg == 6) {
+            // (HL) operand — would need more M-cycles.
+            // TODO: implement CB (HL) operations
+            self.halted = true;
+            return;
+        }
+
+        const val = self.getReg8(reg);
+
+        if (cb_op >= 0x40 and cb_op <= 0x7F) {
+            // BIT b, r — test bit (2M total for register)
+            self.f = (self.f & flag_c) | flag_h;
+            if (val & (@as(u8, 1) << bit) == 0) self.f |= flag_z;
+            self.m_cycle = 0;
+        } else if (cb_op >= 0x00 and cb_op <= 0x07) {
+            // RLC r — rotate left circular
+            const result = (val << 1) | (val >> 7);
+            self.setReg8(reg, result);
+            self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+            if (result == 0) self.f |= flag_z;
+            self.m_cycle = 0;
+        } else if (cb_op >= 0x10 and cb_op <= 0x17) {
+            // RL r — rotate left through carry
+            const carry: u8 = if (self.f & flag_c != 0) 1 else 0;
+            const result = (val << 1) | carry;
+            self.setReg8(reg, result);
+            self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+            if (result == 0) self.f |= flag_z;
+            self.m_cycle = 0;
+        } else {
+            self.halted = true;
+        }
     }
 
     fn getReg8(self: *const SM83, reg: u3) u8 {
@@ -805,6 +1062,164 @@ test "AND d8 sets half-carry flag" {
     try std.testing.expectEqual(@as(u8, 0x00), cpu.a);
     try std.testing.expect(cpu.f & SM83.flag_z != 0);
     try std.testing.expect(cpu.f & SM83.flag_h != 0); // AND always sets H
+}
+
+test "JR NZ takes branch when Z clear" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x20; // JR NZ, -3 (0xFD = -3)
+    ram[1] = 0xFD;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.f = 0; // Z clear
+
+    cpu.tick(&bus); // fetch
+    cpu.tick(&bus); // read offset, branch taken
+    cpu.tick(&bus); // internal: apply offset
+    // PC was 2 after reading offset, -3 = 0xFFFF
+    try std.testing.expectEqual(@as(u16, 0xFFFF), cpu.pc);
+    try std.testing.expectEqual(@as(u3, 0), cpu.m_cycle);
+}
+
+test "JR NZ skips branch when Z set" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0x20; // JR NZ, -3
+    ram[1] = 0xFD;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.f = SM83.flag_z; // Z set
+
+    cpu.tick(&bus); // fetch
+    cpu.tick(&bus); // read offset, not taken
+    try std.testing.expectEqual(@as(u16, 2), cpu.pc); // just advances past
+    try std.testing.expectEqual(@as(u3, 0), cpu.m_cycle);
+}
+
+test "CALL pushes return address and jumps" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCD; // CALL $0095
+    ram[1] = 0x95;
+    ram[2] = 0x00;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.sp = 0xFFFE;
+
+    for (0..6) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u16, 0x0095), cpu.pc);
+    try std.testing.expectEqual(@as(u16, 0xFFFC), cpu.sp);
+    // Return address (0x0003) pushed: high then low
+    try std.testing.expectEqual(@as(u8, 0x00), ram[0xFFFD]);
+    try std.testing.expectEqual(@as(u8, 0x03), ram[0xFFFC]);
+}
+
+test "RET pops return address" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xC9; // RET
+    ram[0xFFFC] = 0x03; // return address low
+    ram[0xFFFD] = 0x00; // return address high
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.sp = 0xFFFC;
+
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u16, 0x0003), cpu.pc);
+    try std.testing.expectEqual(@as(u16, 0xFFFE), cpu.sp);
+}
+
+test "PUSH BC and POP BC round-trip" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xC5; // PUSH BC
+    ram[1] = 0xC1; // POP BC
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.sp = 0xFFFE;
+    cpu.b = 0x12;
+    cpu.c = 0x34;
+
+    // PUSH BC: 4 M-cycles
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u16, 0xFFFC), cpu.sp);
+
+    // Clear BC
+    cpu.b = 0;
+    cpu.c = 0;
+
+    // POP BC: 3 M-cycles
+    for (0..3) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x12), cpu.b);
+    try std.testing.expectEqual(@as(u8, 0x34), cpu.c);
+    try std.testing.expectEqual(@as(u16, 0xFFFE), cpu.sp);
+}
+
+test "POP AF masks lower 4 bits of F" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xF1; // POP AF
+    ram[0xFFFC] = 0xFF; // F value with low bits set
+    ram[0xFFFD] = 0x42; // A value
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.sp = 0xFFFC;
+
+    for (0..3) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x42), cpu.a);
+    try std.testing.expectEqual(@as(u8, 0xF0), cpu.f); // lower 4 bits cleared
+}
+
+test "BIT 7, H sets Z when bit clear" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB; // CB prefix
+    ram[1] = 0x7C; // BIT 7, H
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x00; // bit 7 clear
+    cpu.f = SM83.flag_c; // carry set before
+
+    cpu.tick(&bus); // fetch CB
+    cpu.tick(&bus); // fetch 0x7C, execute
+    try std.testing.expect(cpu.f & SM83.flag_z != 0);
+    try std.testing.expect(cpu.f & SM83.flag_h != 0);
+    try std.testing.expect(cpu.f & SM83.flag_n == 0);
+    try std.testing.expect(cpu.f & SM83.flag_c != 0); // preserved
+}
+
+test "BIT 7, H clears Z when bit set" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0x7C;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80; // bit 7 set
+
+    cpu.tick(&bus);
+    cpu.tick(&bus);
+    try std.testing.expect(cpu.f & SM83.flag_z == 0);
+}
+
+test "RL C rotates through carry" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0x11; // RL C
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.c = 0x80;
+    cpu.f = 0; // carry clear
+
+    cpu.tick(&bus);
+    cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x00), cpu.c);
+    try std.testing.expect(cpu.f & SM83.flag_c != 0); // old bit 7
+    try std.testing.expect(cpu.f & SM83.flag_z != 0); // result is 0
+}
+
+test "JP a16 jumps to absolute address" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xC3; // JP $0100
+    ram[1] = 0x00;
+    ram[2] = 0x01;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u16, 0x0100), cpu.pc);
 }
 
 test "multi-M-cycle instruction followed by NOP" {
