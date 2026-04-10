@@ -188,6 +188,50 @@ pub const SM83 = struct {
                 else => unreachable,
             },
 
+            // LD (a16), A — write A to absolute address (4M)
+            0xEA => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    bus.write(self.wz(), self.a);
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // LD A, (a16) — read from absolute address into A (4M)
+            0xFA => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    self.a = bus.read(self.wz());
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
             // LD ($FF00+C), A — write A to [$FF00 + C] (2M)
             0xE2 => switch (self.m_cycle) {
                 0 => {

@@ -1,10 +1,12 @@
 const std = @import("std");
 const SM83 = @import("sm83.zig").SM83;
 const Timer = @import("timer.zig").Timer;
+const PPU = @import("ppu.zig").PPU;
 
 pub const GameBoy = struct {
     cpu: SM83 = .{},
     timer: Timer = .{},
+    ppu: PPU = .{},
     ram: [0x10000]u8 = [_]u8{0} ** 0x10000,
     boot_rom: [256]u8 = [_]u8{0} ** 256,
     boot_rom_active: bool = false,
@@ -16,6 +18,7 @@ pub const GameBoy = struct {
     /// Timer ticks every T-cycle. CPU ticks every 4th (M-cycle).
     pub fn tick(self: *GameBoy) void {
         self.timer.tick();
+        self.ppu.tick();
 
         if (self.cpu_divider == 0) {
             self.cpu.tick(self);
@@ -44,6 +47,8 @@ pub const GameBoy = struct {
             0xFF05 => self.timer.tima,
             0xFF06 => self.timer.tma,
             0xFF07 => self.timer.readTac(),
+            0xFF41 => self.ppu.readStat(),
+            0xFF44 => self.ppu.ly,
             else => self.ram[addr],
         };
     }

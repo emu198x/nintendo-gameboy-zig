@@ -50,7 +50,7 @@ pub fn main() void {
     }
 
     // Run until halted or cycle limit
-    const max_cycles: u64 = 4_000_000; // ~1 second of Game Boy time
+    const max_cycles: u64 = 40_000_000; // ~10 seconds of Game Boy time
     while (!gb.cpu.halted and gb.t_cycle < max_cycles) {
         gb.tick();
     }
