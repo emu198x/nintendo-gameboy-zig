@@ -19,3 +19,4 @@ Game Boy (DMG) emulator in Zig 0.15. Full hardware accuracy.
 ## Decisions
 
 - [Clock model](decisions/clock-model.md) — T-cycle master oscillator with /4 CPU divider
+- [CPU state machine](decisions/cpu-state-machine.md) — stored opcode + M-cycle counter, not tagged union
