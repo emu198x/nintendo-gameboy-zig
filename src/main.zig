@@ -65,6 +65,10 @@ fn shadeToARGB(shade: u2) u32 {
 // -- Main --------------------------------------------------------------
 
 pub fn main() void {
+    var gba = std.heap.DebugAllocator(.{}){};
+    defer _ = gba.deinit();
+    const allocator = gba.allocator();
+
     var gb = dmg.GameBoy{};
 
     // Parse arguments
@@ -97,12 +101,22 @@ pub fn main() void {
             };
             defer cart_file.close();
 
-            var cart_data: [0x8000]u8 = undefined;
-            const cart_n = cart_file.readAll(&cart_data) catch |err| {
+            const cart_size = cart_file.getEndPos() catch |err| {
+                std.debug.print("Could not stat cartridge: {}\n", .{err});
+                return;
+            };
+            const cart_data = allocator.alloc(u8, cart_size) catch |err| {
+                std.debug.print("Could not allocate cartridge buffer: {}\n", .{err});
+                return;
+            };
+            // Note: we intentionally don't free cart_data — it lives for the
+            // whole program and GameBoy holds a slice into it.
+            const cart_n = cart_file.readAll(cart_data) catch |err| {
                 std.debug.print("Could not read cartridge: {}\n", .{err});
                 return;
             };
             gb.loadCartridge(cart_data[0..cart_n]);
+            std.debug.print("Loaded {d} byte cartridge\n", .{cart_n});
         }
     } else {
         std.debug.print("Usage: dmg <boot.bin> [cartridge.gb]\n", .{});
