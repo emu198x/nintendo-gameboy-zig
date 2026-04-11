@@ -35,6 +35,8 @@ const sdl = struct {
     extern "SDL3" fn SDL_PollEvent(event: *Event) bool;
     extern "SDL3" fn SDL_SetTextureScaleMode(texture: *Texture, mode: c_int) bool;
     extern "SDL3" fn SDL_GetKeyboardState(numkeys: ?*c_int) [*]const bool;
+    extern "SDL3" fn SDL_GetTicksNS() u64;
+    extern "SDL3" fn SDL_DelayNS(ns: u64) void;
 
     // Scancodes (USB HID standard, used by SDL)
     const SCANCODE_RIGHT: usize = 79;
@@ -142,6 +144,10 @@ pub fn main() void {
     _ = sdl.SDL_SetTextureScaleMode(texture, sdl.SCALEMODE_NEAREST);
 
     // Main loop
+    // Frame pacing: 70224 T-cycles / 4.194304 MHz ≈ 16.7427 ms
+    const frame_ns: u64 = 16_742_706;
+    var next_frame_time: u64 = sdl.SDL_GetTicksNS();
+
     var frame_count: u32 = 0;
     var running = true;
     while (running) {
@@ -239,6 +245,16 @@ pub fn main() void {
             gb.interrupt_flag |= 0x10;
         }
         gb.buttons = buttons;
+
+        // Frame pacing: sleep until the next frame should start
+        next_frame_time += frame_ns;
+        const now = sdl.SDL_GetTicksNS();
+        if (next_frame_time > now) {
+            sdl.SDL_DelayNS(next_frame_time - now);
+        } else {
+            // Running behind: don't try to catch up
+            next_frame_time = now;
+        }
 
         if (gb.cpu.halted) {
             std.debug.print("CPU halted at PC=0x{x:0>4} opcode=0x{x:0>2}\n", .{ gb.cpu.pc, gb.cpu.opcode });
