@@ -35,6 +35,7 @@ const Fetcher = struct {
     tile_data_low: u8 = 0,
     tile_data_high: u8 = 0,
     x: u8 = 0, // tile column counter
+    window_mode: bool = false,
 
     const State = enum {
         read_tile_id,
@@ -47,6 +48,14 @@ const Fetcher = struct {
         self.state = .read_tile_id;
         self.ticks = 0;
         self.x = 0;
+        self.window_mode = false;
+    }
+
+    fn switchToWindow(self: *Fetcher) void {
+        self.state = .read_tile_id;
+        self.ticks = 0;
+        self.x = 0;
+        self.window_mode = true;
     }
 
     fn tick(self: *Fetcher, ppu: *PPU, vram: []const u8) void {
@@ -55,10 +64,19 @@ const Fetcher = struct {
 
         switch (self.state) {
             .read_tile_id => {
-                const y: u16 = ppu.ly +% ppu.scy;
-                const x: u16 = @as(u16, self.x) * 8 +% ppu.scx;
-                const map_base: u16 = if (ppu.lcdc & 0x08 != 0) 0x1C00 else 0x1800;
-                const map_addr = map_base + (y / 8 % 32) * 32 + (x / 8 % 32);
+                var map_addr: u16 = undefined;
+                if (self.window_mode) {
+                    // Window tile map: LCDC bit 6 selects 0x9800/0x9C00
+                    const map_base: u16 = if (ppu.lcdc & 0x40 != 0) 0x1C00 else 0x1800;
+                    const wy: u16 = ppu.window_line;
+                    map_addr = map_base + (wy / 8) * 32 + self.x;
+                } else {
+                    // BG tile map: LCDC bit 3 selects 0x9800/0x9C00
+                    const y: u16 = ppu.ly +% ppu.scy;
+                    const x: u16 = @as(u16, self.x) * 8 +% ppu.scx;
+                    const map_base: u16 = if (ppu.lcdc & 0x08 != 0) 0x1C00 else 0x1800;
+                    map_addr = map_base + (y / 8 % 32) * 32 + (x / 8 % 32);
+                }
                 self.tile_id = vram[map_addr];
                 self.state = .read_tile_data_low;
             },
@@ -82,7 +100,11 @@ const Fetcher = struct {
     }
 
     fn tileDataAddr(self: *const Fetcher, ppu: *const PPU) u16 {
-        const row: u16 = (@as(u16, ppu.ly) +% ppu.scy) % 8;
+        const row: u16 = if (self.window_mode)
+            @as(u16, ppu.window_line) % 8
+        else
+            (@as(u16, ppu.ly) +% ppu.scy) % 8;
+
         if (ppu.lcdc & 0x10 != 0) {
             // Unsigned: base 0x0000 (= 0x8000 in absolute), tile_id 0-255
             return @as(u16, self.tile_id) * 16 + row * 2;
@@ -132,6 +154,10 @@ pub const PPU = struct {
     sprites: [10]Sprite = undefined,
     sprite_count: u8 = 0,
 
+    // Window rendering
+    window_line: u8 = 0, // counter of scanlines where window was drawn
+    window_triggered: bool = false, // window drawn on current scanline
+
     // Registers
     lcdc: u8 = 0x91, // power-on default: LCD on, BG tile data unsigned, BG enabled
     stat: u8 = 0,
@@ -174,9 +200,21 @@ pub const PPU = struct {
                 self.fifo.clear();
                 self.lcd_x = 0;
                 self.discard_pixels = self.scx & 7;
+                self.window_triggered = false;
             }
 
             if (self.lcd_x < 160) {
+                // Check if window should trigger at this pixel
+                if (!self.fetcher.window_mode and
+                    self.lcdc & 0x20 != 0 and // window enable
+                    self.ly >= self.wy and
+                    self.lcd_x + 7 >= self.wx)
+                {
+                    self.fetcher.switchToWindow();
+                    self.fifo.clear();
+                    self.window_triggered = true;
+                }
+
                 // Mode 3: pixel transfer
                 self.fetcher.tick(self, vram);
 
@@ -208,9 +246,13 @@ pub const PPU = struct {
         self.dot += 1;
         if (self.dot >= dots_per_line) {
             self.dot = 0;
+            if (self.window_triggered) {
+                self.window_line +%= 1;
+            }
             self.ly +%= 1;
             if (self.ly >= lines_per_frame) {
                 self.ly = 0;
+                self.window_line = 0;
             }
         }
     }
