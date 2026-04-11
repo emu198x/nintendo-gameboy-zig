@@ -31,6 +31,12 @@ pub const GameBoy = struct {
     /// JOYP select bits from last write (bits 4-5).
     joypad_select: u8 = 0x30,
 
+    /// Serial data (FF01) and control (FF02).
+    /// When the CPU writes 0x81 to SC, the byte in SB is "transmitted" —
+    /// we log it to stderr so Blargg test ROMs are visible.
+    serial_data: u8 = 0,
+    serial_control: u8 = 0,
+
     t_cycle: u64 = 0,
     cpu_divider: u2 = 0,
 
@@ -196,6 +202,8 @@ pub const GameBoy = struct {
             0xFF44 => self.ppu.ly,
             0xFF45 => self.ppu.lyc,
             0xFF00 => self.readJoypad(),
+            0xFF01 => self.serial_data,
+            0xFF02 => self.serial_control | 0x7E, // bits 1-6 always high
             0xFF0F => self.interrupt_flag,
             0xFF10...0xFF3F => self.apu.read(addr),
             0xFF47 => self.ppu.bgp,
@@ -273,6 +281,18 @@ pub const GameBoy = struct {
             },
             0xFF00 => {
                 self.joypad_select = value & 0x30;
+            },
+            0xFF01 => {
+                self.serial_data = value;
+            },
+            0xFF02 => {
+                self.serial_control = value;
+                // Starting a serial transfer: log the byte and "complete" immediately.
+                if (value & 0x81 == 0x81) {
+                    std.debug.print("{c}", .{self.serial_data});
+                    self.serial_control &= 0x7F; // clear transfer bit
+                    self.interrupt_flag |= 0x08; // serial interrupt
+                }
             },
             0xFF0F => {
                 self.interrupt_flag = value;
