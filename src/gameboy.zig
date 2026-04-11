@@ -44,6 +44,10 @@ pub const GameBoy = struct {
     /// Timer ticks every T-cycle. CPU ticks every 4th (M-cycle).
     pub fn tick(self: *GameBoy) void {
         self.timer.tick();
+        if (self.timer.overflow_pending) {
+            self.timer.overflow_pending = false;
+            self.interrupt_flag |= 0x04; // timer interrupt (IF bit 2)
+        }
         self.apu.tick(self.timer.counter);
 
         const was_vblank = self.ppu.ly >= 144;

@@ -5,6 +5,9 @@ pub const Timer = struct {
     tima: u8 = 0,
     tma: u8 = 0,
     tac: u8 = 0,
+    /// Set to true when TIMA overflows. GameBoy.tick consumes this to
+    /// raise the timer interrupt flag (IF bit 2).
+    overflow_pending: bool = false,
 
     /// Advance the timer by one T-cycle.
     pub fn tick(self: *Timer) void {
@@ -50,9 +53,10 @@ pub const Timer = struct {
     fn incrementTima(self: *Timer) void {
         self.tima +%= 1;
         if (self.tima == 0) {
-            // Overflow: reload from TMA.
-            // TODO: real hardware delays reload by 1 M-cycle and requests interrupt.
+            // Overflow: reload from TMA and flag the interrupt.
+            // TODO: real hardware delays reload by 1 M-cycle.
             self.tima = self.tma;
+            self.overflow_pending = true;
         }
     }
 

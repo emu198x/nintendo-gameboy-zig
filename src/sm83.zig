@@ -484,7 +484,8 @@ pub const SM83 = struct {
 
             // CCF — complement carry flag (1M)
             0x3F => {
-                self.f = (self.f & flag_z) ^ flag_c;
+                // Preserve Z and old C, clear N and H, then flip C.
+                self.f = (self.f & (flag_z | flag_c)) ^ flag_c;
             },
 
             // JP (HL) — jump to address in HL (1M)
