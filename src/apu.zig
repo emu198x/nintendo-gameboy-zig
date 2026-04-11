@@ -37,8 +37,8 @@ pub const APU = struct {
     /// internal 16-bit counter, used to drive the frame sequencer.
     pub fn tick(self: *APU, div_counter: u16) void {
         if (self.enabled) {
-            // Frame sequencer: falling edge of DIV bit 13 (every 8192 T-cycles)
-            const div_bit = (div_counter & 0x2000) != 0;
+            // Frame sequencer: falling edge of counter bit 12 (every 8192 T-cycles = 512 Hz)
+            const div_bit = (div_counter & 0x1000) != 0;
             if (self.prev_div_bit and !div_bit) {
                 self.stepFrameSequencer();
             }
@@ -195,6 +195,10 @@ pub const APU = struct {
             0xFF26 => {
                 const was_enabled = self.enabled;
                 self.enabled = value & 0x80 != 0;
+                if (!was_enabled and self.enabled) {
+                    // Enabling APU resets the frame sequencer
+                    self.frame_step = 0;
+                }
                 if (was_enabled and !self.enabled) {
                     // Disabling APU clears all registers
                     self.ch1 = .{ .has_sweep = true };
@@ -262,11 +266,9 @@ const Square = struct {
             [_]u1{ 0, 1, 1, 1, 1, 1, 1, 0 }, // 75%
         };
 
-        const duty_out = duty_table[self.duty][self.duty_position];
-        if (duty_out == 0) return 0;
-
-        // Map volume (0-15) to -1..+1 range
-        return (@as(f32, @floatFromInt(self.current_volume)) / 7.5) - 1.0;
+        // Symmetric output around 0: high = +amp, low = -amp.
+        const amp = @as(f32, @floatFromInt(self.current_volume)) / 15.0;
+        return if (duty_table[self.duty][self.duty_position] == 1) amp else -amp;
     }
 
     fn stepLength(self: *Square) void {
@@ -528,11 +530,9 @@ const Noise = struct {
 
     fn sample(self: *const Noise) f32 {
         if (!self.enabled or !self.dac_enabled) return 0;
-        // Inverted LFSR bit 0: 1 = high, 0 = silent
-        if (self.lfsr & 1 == 0) {
-            return (@as(f32, @floatFromInt(self.current_volume)) / 7.5) - 1.0;
-        }
-        return -1.0;
+        // The channel output is the INVERTED bit 0 of the LFSR.
+        const amp = @as(f32, @floatFromInt(self.current_volume)) / 15.0;
+        return if (self.lfsr & 1 == 0) amp else -amp;
     }
 
     fn stepLength(self: *Noise) void {
