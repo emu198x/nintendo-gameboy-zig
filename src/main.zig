@@ -34,6 +34,17 @@ const sdl = struct {
     extern "SDL3" fn SDL_RenderPresent(renderer: *Renderer) bool;
     extern "SDL3" fn SDL_PollEvent(event: *Event) bool;
     extern "SDL3" fn SDL_SetTextureScaleMode(texture: *Texture, mode: c_int) bool;
+    extern "SDL3" fn SDL_GetKeyboardState(numkeys: ?*c_int) [*]const bool;
+
+    // Scancodes (USB HID standard, used by SDL)
+    const SCANCODE_RIGHT: usize = 79;
+    const SCANCODE_LEFT: usize = 80;
+    const SCANCODE_DOWN: usize = 81;
+    const SCANCODE_UP: usize = 82;
+    const SCANCODE_Z: usize = 29;
+    const SCANCODE_X: usize = 27;
+    const SCANCODE_RETURN: usize = 40;
+    const SCANCODE_BACKSPACE: usize = 42;
 };
 
 // -- Palette -----------------------------------------------------------
@@ -211,6 +222,24 @@ pub fn main() void {
                 running = false;
             }
         }
+
+        // Poll keyboard and update joypad state
+        const keys = sdl.SDL_GetKeyboardState(null);
+        var buttons: u8 = 0;
+        if (keys[sdl.SCANCODE_RIGHT]) buttons |= 0x01;
+        if (keys[sdl.SCANCODE_LEFT]) buttons |= 0x02;
+        if (keys[sdl.SCANCODE_UP]) buttons |= 0x04;
+        if (keys[sdl.SCANCODE_DOWN]) buttons |= 0x08;
+        if (keys[sdl.SCANCODE_X]) buttons |= 0x10; // A
+        if (keys[sdl.SCANCODE_Z]) buttons |= 0x20; // B
+        if (keys[sdl.SCANCODE_BACKSPACE]) buttons |= 0x40; // Select
+        if (keys[sdl.SCANCODE_RETURN]) buttons |= 0x80; // Start
+
+        // Joypad interrupt on any button transitioning from not-pressed to pressed
+        if ((buttons & ~gb.buttons) != 0) {
+            gb.interrupt_flag |= 0x10;
+        }
+        gb.buttons = buttons;
 
         if (gb.cpu.halted) {
             std.debug.print("CPU halted at PC=0x{x:0>4} opcode=0x{x:0>2}\n", .{ gb.cpu.pc, gb.cpu.opcode });

@@ -12,7 +12,13 @@ pub const GameBoy = struct {
     boot_rom_active: bool = false,
     interrupt_flag: u8 = 0, // IF (FF0F)
     interrupt_enable: u8 = 0, // IE (FFFF)
-    joypad: u8 = 0xFF, // FF00 — all buttons released
+
+    /// Buttons pressed, 1 = pressed:
+    /// bit 0: Right, 1: Left, 2: Up, 3: Down
+    /// bit 4: A, 5: B, 6: Select, 7: Start
+    buttons: u8 = 0,
+    /// JOYP select bits from last write (bits 4-5).
+    joypad_select: u8 = 0x30,
 
     t_cycle: u64 = 0,
     cpu_divider: u2 = 0,
@@ -37,6 +43,19 @@ pub const GameBoy = struct {
         self.cpu_divider +%= 1;
 
         self.t_cycle += 1;
+    }
+
+    pub fn readJoypad(self: *const GameBoy) u8 {
+        var lines: u8 = 0x0F;
+        if (self.joypad_select & 0x10 == 0) {
+            // D-pad selected: clear bits for pressed D-pad buttons
+            lines &= ~(self.buttons & 0x0F);
+        }
+        if (self.joypad_select & 0x20 == 0) {
+            // Face buttons selected: clear bits for pressed face buttons
+            lines &= ~((self.buttons >> 4) & 0x0F);
+        }
+        return 0xC0 | self.joypad_select | lines;
     }
 
     pub fn loadBootRom(self: *GameBoy, data: []const u8) void {
@@ -64,7 +83,7 @@ pub const GameBoy = struct {
             0xFF43 => self.ppu.scx,
             0xFF44 => self.ppu.ly,
             0xFF45 => self.ppu.lyc,
-            0xFF00 => (self.joypad & 0x30) | 0xCF, // select bits from write, bits 6-7 always high, no buttons pressed
+            0xFF00 => self.readJoypad(),
             0xFF0F => self.interrupt_flag,
             0xFF47 => self.ppu.bgp,
             0xFFFF => self.interrupt_enable,
@@ -110,7 +129,7 @@ pub const GameBoy = struct {
                 self.ppu.bgp = value;
             },
             0xFF00 => {
-                self.joypad = value;
+                self.joypad_select = value & 0x30;
             },
             0xFF0F => {
                 self.interrupt_flag = value;
