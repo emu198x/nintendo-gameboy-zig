@@ -259,6 +259,50 @@ pub const SM83 = struct {
                 else => unreachable,
             },
 
+            // LD (a16), SP — write SP to absolute address (5M)
+            0x08 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.z = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 2;
+                },
+                2 => {
+                    self.w = bus.read(self.pc);
+                    self.pc +%= 1;
+                    self.m_cycle = 3;
+                },
+                3 => {
+                    bus.write(self.wz(), @truncate(self.sp));
+                    self.m_cycle = 4;
+                },
+                4 => {
+                    bus.write(self.wz() +% 1, @intCast(self.sp >> 8));
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
+            // STOP — halt CPU and LCD until button press (1M, ignores next byte)
+            0x10 => {
+                self.pc +%= 1; // skip the next byte
+                self.halt_mode = true;
+            },
+
+            // LD A, ($FF00+C) — read from [$FF00 + C] (2M)
+            0xF2 => switch (self.m_cycle) {
+                0 => {
+                    self.m_cycle = 1;
+                },
+                1 => {
+                    self.a = bus.read(0xFF00 | @as(u16, self.c));
+                    self.m_cycle = 0;
+                },
+                else => unreachable,
+            },
+
             // LD (a16), A — write A to absolute address (4M)
             0xEA => switch (self.m_cycle) {
                 0 => {
