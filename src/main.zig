@@ -56,8 +56,7 @@ const shades = [4]u32{
     0xFF000000, // black
 };
 
-fn paletteToARGB(bgp: u8, index: u2) u32 {
-    const shade: u2 = @truncate(bgp >> (@as(u3, index) * 2));
+fn shadeToARGB(shade: u2) u32 {
     return shades[shade];
 }
 
@@ -157,7 +156,7 @@ pub fn main() void {
         var pixels: [144 * 160]u32 = undefined;
         for (0..144) |y| {
             for (0..160) |x| {
-                pixels[y * 160 + x] = paletteToARGB(gb.ppu.bgp, gb.ppu.framebuffer[y][x]);
+                pixels[y * 160 + x] = shadeToARGB(gb.ppu.framebuffer[y][x]);
             }
         }
 

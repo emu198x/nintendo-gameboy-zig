@@ -29,7 +29,7 @@ pub const GameBoy = struct {
         self.timer.tick();
 
         const was_vblank = self.ppu.ly >= 144;
-        self.ppu.tick(self.ram[0x8000..0xA000]);
+        self.ppu.tick(self.ram[0x8000..0xA000], self.ram[0xFE00..0xFEA0]);
         const now_vblank = self.ppu.ly >= 144;
 
         // Set VBLANK interrupt flag on transition into VBLANK
@@ -86,6 +86,10 @@ pub const GameBoy = struct {
             0xFF00 => self.readJoypad(),
             0xFF0F => self.interrupt_flag,
             0xFF47 => self.ppu.bgp,
+            0xFF48 => self.ppu.obp0,
+            0xFF49 => self.ppu.obp1,
+            0xFF4A => self.ppu.wy,
+            0xFF4B => self.ppu.wx,
             0xFFFF => self.interrupt_enable,
             else => self.ram[addr],
         };
@@ -127,6 +131,26 @@ pub const GameBoy = struct {
             },
             0xFF47 => {
                 self.ppu.bgp = value;
+            },
+            0xFF48 => {
+                self.ppu.obp0 = value;
+            },
+            0xFF49 => {
+                self.ppu.obp1 = value;
+            },
+            0xFF4A => {
+                self.ppu.wy = value;
+            },
+            0xFF4B => {
+                self.ppu.wx = value;
+            },
+            0xFF46 => {
+                // OAM DMA: copy 0xA0 bytes from source to FE00-FE9F
+                const source: u16 = @as(u16, value) << 8;
+                var i: u16 = 0;
+                while (i < 0xA0) : (i += 1) {
+                    self.ram[0xFE00 + i] = self.ram[source + i];
+                }
             },
             0xFF00 => {
                 self.joypad_select = value & 0x30;
