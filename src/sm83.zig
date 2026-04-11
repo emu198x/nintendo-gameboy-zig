@@ -1731,6 +1731,98 @@ test "RL C rotates through carry" {
     try std.testing.expect(cpu.f & SM83.flag_z != 0); // result is 0
 }
 
+test "BIT 7, (HL) takes 3 M-cycles and tests memory bit" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB; // CB prefix
+    ram[1] = 0x7E; // BIT 7, (HL)
+    ram[0x8000] = 0x80; // bit 7 set
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0x00;
+
+    cpu.tick(&bus); // fetch CB
+    cpu.tick(&bus); // fetch sub-opcode, advances to m_cycle 2
+    cpu.tick(&bus); // read [HL], test bit, done
+    try std.testing.expect(cpu.f & SM83.flag_z == 0); // bit set → Z clear
+    try std.testing.expect(cpu.f & SM83.flag_h != 0);
+    try std.testing.expectEqual(@as(u3, 0), cpu.m_cycle);
+}
+
+test "BIT 7, (HL) sets Z when bit clear" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0x7E;
+    ram[0x8000] = 0x00;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0x00;
+
+    for (0..3) |_| cpu.tick(&bus);
+    try std.testing.expect(cpu.f & SM83.flag_z != 0);
+}
+
+test "RES 3, (HL) takes 4 M-cycles and clears memory bit" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0x9E; // RES 3, (HL)
+    ram[0x8000] = 0xFF;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0x00;
+
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0xF7), ram[0x8000]); // bit 3 cleared
+    try std.testing.expectEqual(@as(u3, 0), cpu.m_cycle);
+}
+
+test "SET 0, (HL) sets memory bit" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0xC6; // SET 0, (HL)
+    ram[0x8000] = 0x00;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0x00;
+
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x01), ram[0x8000]);
+}
+
+test "SWAP (HL) swaps nibbles" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0x36; // SWAP (HL)
+    ram[0x8000] = 0xAB;
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0x00;
+
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0xBA), ram[0x8000]);
+}
+
+test "RL (HL) rotates memory byte through carry" {
+    var ram = [_]u8{0x00} ** 0x10000;
+    ram[0] = 0xCB;
+    ram[1] = 0x16; // RL (HL)
+    ram[0x8000] = 0x80; // bit 7 set
+    var bus = TestBus{ .ram = &ram };
+    var cpu = SM83{};
+    cpu.h = 0x80;
+    cpu.l = 0x00;
+    cpu.f = 0; // carry clear
+
+    for (0..4) |_| cpu.tick(&bus);
+    try std.testing.expectEqual(@as(u8, 0x00), ram[0x8000]); // 0x80 << 1 with carry in 0
+    try std.testing.expect(cpu.f & SM83.flag_c != 0); // old bit 7 → carry
+    try std.testing.expect(cpu.f & SM83.flag_z != 0); // result is 0
+}
+
 test "JP a16 jumps to absolute address" {
     var ram = [_]u8{0x00} ** 0x10000;
     ram[0] = 0xC3; // JP $0100
