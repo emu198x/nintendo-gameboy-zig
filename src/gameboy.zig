@@ -10,6 +10,9 @@ pub const GameBoy = struct {
     ram: [0x10000]u8 = [_]u8{0} ** 0x10000,
     boot_rom: [256]u8 = [_]u8{0} ** 256,
     boot_rom_active: bool = false,
+    interrupt_flag: u8 = 0, // IF (FF0F)
+    interrupt_enable: u8 = 0, // IE (FFFF)
+    joypad: u8 = 0xFF, // FF00 — all buttons released
 
     t_cycle: u64 = 0,
     cpu_divider: u2 = 0,
@@ -18,7 +21,15 @@ pub const GameBoy = struct {
     /// Timer ticks every T-cycle. CPU ticks every 4th (M-cycle).
     pub fn tick(self: *GameBoy) void {
         self.timer.tick();
+
+        const was_vblank = self.ppu.ly >= 144;
         self.ppu.tick(self.ram[0x8000..0xA000]);
+        const now_vblank = self.ppu.ly >= 144;
+
+        // Set VBLANK interrupt flag on transition into VBLANK
+        if (!was_vblank and now_vblank) {
+            self.interrupt_flag |= 0x01;
+        }
 
         if (self.cpu_divider == 0) {
             self.cpu.tick(self);
@@ -53,12 +64,19 @@ pub const GameBoy = struct {
             0xFF43 => self.ppu.scx,
             0xFF44 => self.ppu.ly,
             0xFF45 => self.ppu.lyc,
+            0xFF00 => (self.joypad & 0x30) | 0xCF, // select bits from write, bits 6-7 always high, no buttons pressed
+            0xFF0F => self.interrupt_flag,
             0xFF47 => self.ppu.bgp,
+            0xFFFF => self.interrupt_enable,
             else => self.ram[addr],
         };
     }
 
     pub fn write(self: *GameBoy, addr: u16, value: u8) void {
+        // Writes to cartridge ROM (0x0000-0x7FFF) are no-ops for ROM-only
+        // cartridges. MBC chips use writes here for bank switching (TODO).
+        if (addr < 0x8000) return;
+
         switch (addr) {
             0xFF04 => self.timer.writeDiv(),
             0xFF05 => {
@@ -91,8 +109,17 @@ pub const GameBoy = struct {
             0xFF47 => {
                 self.ppu.bgp = value;
             },
+            0xFF00 => {
+                self.joypad = value;
+            },
+            0xFF0F => {
+                self.interrupt_flag = value;
+            },
             0xFF50 => {
                 if (value != 0) self.boot_rom_active = false;
+            },
+            0xFFFF => {
+                self.interrupt_enable = value;
             },
             else => {
                 self.ram[addr] = value;

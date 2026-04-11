@@ -18,7 +18,8 @@ pub const SM83 = struct {
     m_cycle: u3 = 0,
     z: u8 = 0, // internal temp (low byte)
     w: u8 = 0, // internal temp (high byte)
-    halted: bool = false,
+    halted: bool = false, // unimplemented opcode
+    halt_mode: bool = false, // HALT instruction — waiting for interrupt
     ime: bool = false, // interrupt master enable
     ime_pending: bool = false, // EI delays by one instruction
 
@@ -31,7 +32,40 @@ pub const SM83 = struct {
     pub fn tick(self: *SM83, bus: anytype) void {
         if (self.halted) return;
 
+        // HALT: wait for interrupt
+        if (self.halt_mode) {
+            // Check if any interrupt is pending (IF & IE)
+            const int_flag = bus.read(0xFF0F);
+            const int_enable = bus.read(0xFFFF);
+            if (int_flag & int_enable & 0x1F != 0) {
+                self.halt_mode = false;
+            } else {
+                return;
+            }
+        }
+
         if (self.m_cycle == 0) {
+            // Check for interrupt dispatch
+            if (self.ime) {
+                const int_flag = bus.read(0xFF0F);
+                const int_enable = bus.read(0xFFFF);
+                const pending = int_flag & int_enable & 0x1F;
+                if (pending != 0) {
+                    self.ime = false;
+                    // Find highest priority interrupt (lowest bit)
+                    const bit = @ctz(pending);
+                    // Clear the served interrupt flag
+                    bus.write(0xFF0F, int_flag & ~(@as(u8, 1) << @intCast(bit)));
+                    // Push PC and jump to vector
+                    self.sp -%= 1;
+                    bus.write(self.sp, @intCast(self.pc >> 8));
+                    self.sp -%= 1;
+                    bus.write(self.sp, @truncate(self.pc));
+                    self.pc = @as(u16, 0x0040) + @as(u16, bit) * 8;
+                    return; // interrupt dispatch consumes this M-cycle
+                }
+            }
+
             // EI takes effect after the instruction following it
             if (self.ime_pending) {
                 self.ime_pending = false;
@@ -376,6 +410,11 @@ pub const SM83 = struct {
                     self.m_cycle = 0;
                 },
                 else => unreachable,
+            },
+
+            // HALT — stop CPU until interrupt (1M)
+            0x76 => {
+                self.halt_mode = true;
             },
 
             // DI — disable interrupts (1M)
@@ -845,15 +884,40 @@ pub const SM83 = struct {
                 else => unreachable,
             },
 
-            // CB prefix — two-byte instructions (2M+ depending on operand)
+            // CB prefix — two-byte instructions (2M reg, 3M BIT (HL), 4M RES/SET/shift (HL))
             0xCB => switch (self.m_cycle) {
                 0 => {
                     self.m_cycle = 1;
                 },
                 1 => {
-                    const cb_op = bus.read(self.pc);
+                    self.z = bus.read(self.pc);
                     self.pc +%= 1;
-                    self.executeCB(cb_op);
+                    const reg: u3 = @truncate(self.z);
+                    if (reg == 6) {
+                        self.m_cycle = 2; // (HL) operand: needs memory access
+                    } else {
+                        self.executeCBReg(self.z);
+                        self.m_cycle = 0;
+                    }
+                },
+                2 => {
+                    self.w = bus.read(self.hl());
+                    const op_type: u2 = @truncate(self.z >> 6);
+                    if (op_type == 1) {
+                        // BIT b, (HL) — test only (3M total, no write)
+                        const bit: u3 = @truncate(self.z >> 3);
+                        self.f = (self.f & flag_c) | flag_h;
+                        if (self.w & (@as(u8, 1) << bit) == 0) self.f |= flag_z;
+                        self.m_cycle = 0;
+                    } else {
+                        // Rotate/shift/RES/SET — modify then write (4M total)
+                        self.w = self.cbModify(self.z, self.w);
+                        self.m_cycle = 3;
+                    }
+                },
+                3 => {
+                    bus.write(self.hl(), self.w);
+                    self.m_cycle = 0;
                 },
                 else => unreachable,
             },
@@ -960,81 +1024,77 @@ pub const SM83 = struct {
         }
     }
 
-    /// Execute a CB-prefixed instruction. Called during M-cycle 1.
-    fn executeCB(self: *SM83, cb_op: u8) void {
+    /// Execute a CB-prefixed instruction with a register operand.
+    fn executeCBReg(self: *SM83, cb_op: u8) void {
         const reg: u3 = @truncate(cb_op);
         const bit: u3 = @truncate(cb_op >> 3);
-
-        if (reg == 6) {
-            // (HL) operand — would need more M-cycles.
-            // TODO: implement CB (HL) operations
-            self.halted = true;
-            return;
-        }
-
         const val = self.getReg8(reg);
 
         switch (@as(u2, @truncate(cb_op >> 6))) {
-            0 => {
-                // Rotate/shift operations (0x00-0x3F)
-                const op: u3 = @truncate(cb_op >> 3);
-                const result = switch (op) {
-                    0 => rlc: { // RLC
-                        self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
-                        break :rlc (val << 1) | (val >> 7);
-                    },
-                    1 => rrc: { // RRC
-                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
-                        break :rrc (val >> 1) | (val << 7);
-                    },
-                    2 => rl: { // RL
-                        const carry: u8 = if (self.f & flag_c != 0) 1 else 0;
-                        self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
-                        break :rl (val << 1) | carry;
-                    },
-                    3 => rr: { // RR
-                        const carry: u8 = if (self.f & flag_c != 0) 0x80 else 0;
-                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
-                        break :rr (val >> 1) | carry;
-                    },
-                    4 => sla: { // SLA
-                        self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
-                        break :sla val << 1;
-                    },
-                    5 => sra: { // SRA (arithmetic — bit 7 preserved)
-                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
-                        break :sra (val >> 1) | (val & 0x80);
-                    },
-                    6 => swap: { // SWAP
-                        self.f = 0;
-                        break :swap (val >> 4) | (val << 4);
-                    },
-                    7 => srl: { // SRL
-                        self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
-                        break :srl val >> 1;
-                    },
-                };
-                if (result == 0) self.f |= flag_z;
-                self.setReg8(reg, result);
-                self.m_cycle = 0;
-            },
+            0 => self.setReg8(reg, self.cbRotShift(cb_op, val)),
             1 => {
-                // BIT b, r (0x40-0x7F)
+                // BIT b, r
                 self.f = (self.f & flag_c) | flag_h;
                 if (val & (@as(u8, 1) << bit) == 0) self.f |= flag_z;
-                self.m_cycle = 0;
             },
-            2 => {
-                // RES b, r (0x80-0xBF)
-                self.setReg8(reg, val & ~(@as(u8, 1) << bit));
-                self.m_cycle = 0;
-            },
-            3 => {
-                // SET b, r (0xC0-0xFF)
-                self.setReg8(reg, val | (@as(u8, 1) << bit));
-                self.m_cycle = 0;
-            },
+            2 => self.setReg8(reg, val & ~(@as(u8, 1) << bit)), // RES b, r
+            3 => self.setReg8(reg, val | (@as(u8, 1) << bit)), // SET b, r
         }
+    }
+
+    /// Apply a CB modification to a value (for (HL) operations).
+    /// For BIT, the caller handles it separately (no modification).
+    fn cbModify(self: *SM83, cb_op: u8, val: u8) u8 {
+        const bit: u3 = @truncate(cb_op >> 3);
+        return switch (@as(u2, @truncate(cb_op >> 6))) {
+            0 => self.cbRotShift(cb_op, val),
+            1 => unreachable, // BIT handled separately
+            2 => val & ~(@as(u8, 1) << bit), // RES
+            3 => val | (@as(u8, 1) << bit), // SET
+        };
+    }
+
+    /// Rotate/shift operations (CB 0x00-0x3F). Sets flags, returns result.
+    fn cbRotShift(self: *SM83, cb_op: u8, val: u8) u8 {
+        const op: u3 = @truncate(cb_op >> 3);
+        const result: u8 = switch (op) {
+            0 => rlc: { // RLC
+                self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+                break :rlc (val << 1) | (val >> 7);
+            },
+            1 => rrc: { // RRC
+                self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                break :rrc (val >> 1) | (val << 7);
+            },
+            2 => rl: { // RL
+                const carry: u8 = if (self.f & flag_c != 0) 1 else 0;
+                self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+                break :rl (val << 1) | carry;
+            },
+            3 => rr: { // RR
+                const carry: u8 = if (self.f & flag_c != 0) 0x80 else 0;
+                self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                break :rr (val >> 1) | carry;
+            },
+            4 => sla: { // SLA
+                self.f = if (val & 0x80 != 0) flag_c else @as(u8, 0);
+                break :sla val << 1;
+            },
+            5 => sra: { // SRA (arithmetic — bit 7 preserved)
+                self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                break :sra (val >> 1) | (val & 0x80);
+            },
+            6 => swap: { // SWAP
+                self.f = 0;
+                break :swap (val >> 4) | (val << 4);
+            },
+            7 => srl: { // SRL
+                self.f = if (val & 1 != 0) flag_c else @as(u8, 0);
+                break :srl val >> 1;
+            },
+        };
+        if (result == 0) self.f |= flag_z;
+        return result;
     }
 
     fn getReg8(self: *const SM83, reg: u3) u8 {
@@ -1158,7 +1218,7 @@ test "consecutive NOPs advance PC" {
 
 test "unimplemented opcode halts" {
     var ram = [_]u8{0x00} ** 0x10000;
-    ram[0] = 0x76; // HALT — not yet implemented
+    ram[0] = 0xD3; // undefined opcode
     var bus = TestBus{ .ram = &ram };
     var cpu = SM83{};
 
@@ -1168,7 +1228,7 @@ test "unimplemented opcode halts" {
 
 test "halted CPU does not advance PC" {
     var ram = [_]u8{0x00} ** 0x10000;
-    ram[0] = 0x76;
+    ram[0] = 0xD3;
     var bus = TestBus{ .ram = &ram };
     var cpu = SM83{};
 

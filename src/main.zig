@@ -132,6 +132,7 @@ pub fn main() void {
     _ = sdl.SDL_SetTextureScaleMode(texture, sdl.SCALEMODE_NEAREST);
 
     // Main loop
+    var frame_count: u32 = 0;
     var running = true;
     while (running) {
         // Run emulation until VBLANK
@@ -147,6 +148,54 @@ pub fn main() void {
             for (0..160) |x| {
                 pixels[y * 160 + x] = paletteToARGB(gb.ppu.bgp, gb.ppu.framebuffer[y][x]);
             }
+        }
+
+        frame_count += 1;
+
+        // Dump diagnostics
+        if (false) {
+            std.debug.print("Frame {d}: LCDC=0x{x:0>2} BGP=0x{x:0>2} SCY={d} SCX={d} IE=0x{x:0>2} IF=0x{x:0>2} IME={} PC=0x{x:0>4}\n", .{
+                frame_count,
+                gb.ppu.lcdc,     gb.ppu.bgp, gb.ppu.scy, gb.ppu.scx,
+                gb.interrupt_enable, gb.interrupt_flag, gb.cpu.ime, gb.cpu.pc,
+            });
+            // Dump tile map row 0 (first 32 entries)
+            std.debug.print("TileMap[0..32]: ", .{});
+            for (0..32) |i| {
+                std.debug.print("{x:0>2} ", .{gb.ram[0x9800 + i]});
+            }
+            std.debug.print("\n", .{});
+
+            // Count non-white pixels
+            var nonwhite: u32 = 0;
+            for (0..144) |y| {
+                for (0..160) |x| {
+                    if (gb.ppu.framebuffer[y][x] != 0) nonwhite += 1;
+                }
+            }
+            std.debug.print("Non-white pixels: {d}/23040\n", .{nonwhite});
+
+            // Write PPM
+            var fname_buf: [32]u8 = undefined;
+            const fname = std.fmt.bufPrint(&fname_buf, "frame{d}.ppm", .{frame_count}) catch "frame.ppm";
+            const ppm_file = std.fs.cwd().createFile(fname, .{}) catch |err| {
+                std.debug.print("Could not create PPM: {}\n", .{err});
+                break;
+            };
+            defer ppm_file.close();
+            ppm_file.writeAll("P6\n160 144\n255\n") catch {};
+            for (0..144) |y| {
+                for (0..160) |x| {
+                    const argb = pixels[y * 160 + x];
+                    const rgb = [3]u8{
+                        @truncate(argb >> 16),
+                        @truncate(argb >> 8),
+                        @truncate(argb),
+                    };
+                    ppm_file.writeAll(&rgb) catch {};
+                }
+            }
+            std.debug.print("Wrote {s}\n", .{fname});
         }
 
         // Upload and present
