@@ -2,11 +2,13 @@ const std = @import("std");
 const SM83 = @import("sm83.zig").SM83;
 const Timer = @import("timer.zig").Timer;
 const PPU = @import("ppu.zig").PPU;
+const APU = @import("apu.zig").APU;
 
 pub const GameBoy = struct {
     cpu: SM83 = .{},
     timer: Timer = .{},
     ppu: PPU = .{},
+    apu: APU = .{},
     ram: [0x10000]u8 = [_]u8{0} ** 0x10000,
     boot_rom: [256]u8 = [_]u8{0} ** 256,
     boot_rom_active: bool = false,
@@ -36,6 +38,7 @@ pub const GameBoy = struct {
     /// Timer ticks every T-cycle. CPU ticks every 4th (M-cycle).
     pub fn tick(self: *GameBoy) void {
         self.timer.tick();
+        self.apu.tick(self.timer.counter);
 
         const was_vblank = self.ppu.ly >= 144;
         const prev_stat_line = self.computeStatLine();
@@ -194,6 +197,7 @@ pub const GameBoy = struct {
             0xFF45 => self.ppu.lyc,
             0xFF00 => self.readJoypad(),
             0xFF0F => self.interrupt_flag,
+            0xFF10...0xFF3F => self.apu.read(addr),
             0xFF47 => self.ppu.bgp,
             0xFF48 => self.ppu.obp0,
             0xFF49 => self.ppu.obp1,
@@ -273,6 +277,7 @@ pub const GameBoy = struct {
             0xFF0F => {
                 self.interrupt_flag = value;
             },
+            0xFF10...0xFF3F => self.apu.write(addr, value),
             0xFF50 => {
                 if (value != 0) self.boot_rom_active = false;
             },

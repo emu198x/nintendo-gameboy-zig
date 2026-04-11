@@ -13,7 +13,18 @@ const sdl = struct {
         _pad: [124]u8 = [_]u8{0} ** 124,
     };
 
+    const AudioStream = opaque {};
+
+    const AudioSpec = extern struct {
+        format: u32,
+        channels: c_int,
+        freq: c_int,
+    };
+
+    const INIT_AUDIO: u32 = 0x00000010;
     const INIT_VIDEO: u32 = 0x00000020;
+    const AUDIO_F32: u32 = 0x8120;
+    const AUDIO_DEVICE_DEFAULT_PLAYBACK: u32 = 0xFFFFFFFF;
     const EVENT_QUIT: u32 = 0x100;
     const PIXELFORMAT_ARGB8888: u32 = 0x16362004;
     const TEXTUREACCESS_STREAMING: c_int = 1;
@@ -37,6 +48,10 @@ const sdl = struct {
     extern "SDL3" fn SDL_GetKeyboardState(numkeys: ?*c_int) [*]const bool;
     extern "SDL3" fn SDL_GetTicksNS() u64;
     extern "SDL3" fn SDL_DelayNS(ns: u64) void;
+    extern "SDL3" fn SDL_OpenAudioDeviceStream(devid: u32, spec: *const AudioSpec, callback: ?*const anyopaque, userdata: ?*anyopaque) ?*AudioStream;
+    extern "SDL3" fn SDL_PutAudioStreamData(stream: *AudioStream, buf: [*]const u8, len: c_int) bool;
+    extern "SDL3" fn SDL_ResumeAudioStreamDevice(stream: *AudioStream) bool;
+    extern "SDL3" fn SDL_GetAudioStreamQueued(stream: *AudioStream) c_int;
 
     // Scancodes (USB HID standard, used by SDL)
     const SCANCODE_RIGHT: usize = 79;
@@ -124,11 +139,28 @@ pub fn main() void {
     }
 
     // Init SDL3
-    if (!sdl.SDL_Init(sdl.INIT_VIDEO)) {
+    if (!sdl.SDL_Init(sdl.INIT_VIDEO | sdl.INIT_AUDIO)) {
         std.debug.print("SDL init failed: {s}\n", .{sdl.SDL_GetError()});
         return;
     }
     defer sdl.SDL_Quit();
+
+    // Open audio stream: stereo f32 @ 48kHz
+    const audio_spec = sdl.AudioSpec{
+        .format = sdl.AUDIO_F32,
+        .channels = 2,
+        .freq = @intCast(dmg.APU.sample_rate),
+    };
+    const audio_stream = sdl.SDL_OpenAudioDeviceStream(
+        sdl.AUDIO_DEVICE_DEFAULT_PLAYBACK,
+        &audio_spec,
+        null,
+        null,
+    ) orelse {
+        std.debug.print("Audio stream failed: {s}\n", .{sdl.SDL_GetError()});
+        return;
+    };
+    _ = sdl.SDL_ResumeAudioStreamDevice(audio_stream);
 
     const scale = 4;
     const window = sdl.SDL_CreateWindow("DMG", 160 * scale, 144 * scale, 0) orelse {
@@ -233,6 +265,13 @@ pub fn main() void {
         _ = sdl.SDL_RenderClear(renderer);
         _ = sdl.SDL_RenderTexture(renderer, texture, null, null);
         _ = sdl.SDL_RenderPresent(renderer);
+
+        // Drain APU samples into the audio stream
+        var audio_buf: [2048]f32 = undefined;
+        const n_samples = gb.apu.drainSamples(&audio_buf);
+        if (n_samples > 0) {
+            _ = sdl.SDL_PutAudioStreamData(audio_stream, @ptrCast(&audio_buf), @intCast(n_samples * @sizeOf(f32)));
+        }
 
         // Handle events
         var event: sdl.Event = .{ .type = 0 };
