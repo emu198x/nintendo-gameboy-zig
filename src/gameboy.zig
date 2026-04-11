@@ -29,12 +29,19 @@ pub const GameBoy = struct {
         self.timer.tick();
 
         const was_vblank = self.ppu.ly >= 144;
+        const prev_stat_line = self.computeStatLine();
         self.ppu.tick(self.ram[0x8000..0xA000], self.ram[0xFE00..0xFEA0]);
         const now_vblank = self.ppu.ly >= 144;
 
-        // Set VBLANK interrupt flag on transition into VBLANK
+        // VBLANK interrupt (IF bit 0) on LY 143 -> 144 transition
         if (!was_vblank and now_vblank) {
             self.interrupt_flag |= 0x01;
+        }
+
+        // STAT interrupt (IF bit 1) on rising edge of the STAT line
+        const new_stat_line = self.computeStatLine();
+        if (!prev_stat_line and new_stat_line) {
+            self.interrupt_flag |= 0x02;
         }
 
         if (self.cpu_divider == 0) {
@@ -43,6 +50,18 @@ pub const GameBoy = struct {
         self.cpu_divider +%= 1;
 
         self.t_cycle += 1;
+    }
+
+    /// Compute the STAT interrupt line: OR of selected sources.
+    /// Rising edge of this line raises the STAT interrupt (IF bit 1).
+    fn computeStatLine(self: *const GameBoy) bool {
+        const mode = self.ppu.mode();
+        const stat = self.ppu.stat;
+        if (mode == 0 and stat & 0x08 != 0) return true;
+        if (mode == 1 and stat & 0x10 != 0) return true;
+        if (mode == 2 and stat & 0x20 != 0) return true;
+        if (stat & 0x40 != 0 and self.ppu.ly == self.ppu.lyc) return true;
+        return false;
     }
 
     pub fn readJoypad(self: *const GameBoy) u8 {
