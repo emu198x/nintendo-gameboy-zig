@@ -290,6 +290,7 @@ const Square = struct {
     sweep_timer: u4 = 0,
     sweep_enabled: bool = false,
     shadow_frequency: u16 = 0,
+    sweep_negate_used: bool = false, // set when a negate calc is performed
 
     // DAC enable (bits 3-7 of NRx2, i.e. initial volume + direction non-zero)
     dac_enabled: bool = false,
@@ -344,17 +345,16 @@ const Square = struct {
         if (self.sweep_timer == 0) {
             self.sweep_timer = if (self.sweep_period == 0) 8 else self.sweep_period;
             if (self.sweep_enabled and self.sweep_period > 0) {
+                if (self.sweep_negate) self.sweep_negate_used = true;
                 const new_freq = self.calcSweepFreq();
-                // First overflow check: if result > 2047, disable immediately
                 if (new_freq > 2047) {
                     self.enabled = false;
                     return;
                 }
-                // Apply only if shift != 0
                 if (self.sweep_shift != 0) {
                     self.frequency = @intCast(new_freq);
                     self.shadow_frequency = new_freq;
-                    // Second overflow check: disable on overflow (but do NOT update)
+                    if (self.sweep_negate) self.sweep_negate_used = true;
                     if (self.calcSweepFreq() > 2047) self.enabled = false;
                 }
             }
@@ -377,11 +377,15 @@ const Square = struct {
         self.current_volume = self.envelope_initial;
 
         if (self.has_sweep) {
+            self.sweep_negate_used = false;
             self.shadow_frequency = self.frequency;
             self.sweep_timer = if (self.sweep_period == 0) 8 else self.sweep_period;
             self.sweep_enabled = self.sweep_period != 0 or self.sweep_shift != 0;
-            if (self.sweep_shift != 0 and self.calcSweepFreq() > 2047) {
-                self.enabled = false;
+            if (self.sweep_shift != 0) {
+                if (self.sweep_negate) self.sweep_negate_used = true;
+                if (self.calcSweepFreq() > 2047) {
+                    self.enabled = false;
+                }
             }
         }
     }
@@ -395,7 +399,12 @@ const Square = struct {
     }
     fn writeSweep(self: *Square, value: u8) void {
         self.sweep_period = @truncate((value >> 4) & 0x07);
-        self.sweep_negate = value & 0x08 != 0;
+        const new_negate = value & 0x08 != 0;
+        // Clearing negate after a negate calculation disables the channel.
+        if (self.sweep_negate_used and !new_negate) {
+            self.enabled = false;
+        }
+        self.sweep_negate = new_negate;
         self.sweep_shift = @truncate(value & 0x07);
     }
 
