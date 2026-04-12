@@ -214,6 +214,27 @@ pub fn main() void {
 
         frame_count += 1;
 
+        // Dump framebuffer at frames 600 and 1500 for test debugging
+        if (frame_count == 600 or frame_count == 1500) {
+            var name_buf: [32]u8 = undefined;
+            const fname = std.fmt.bufPrint(&name_buf, "frame_{d}.ppm", .{frame_count}) catch "debug.ppm";
+            const ppm_file = std.fs.cwd().createFile(fname, .{}) catch break;
+            defer ppm_file.close();
+            ppm_file.writeAll("P6\n160 144\n255\n") catch {};
+            for (0..144) |y| {
+                for (0..160) |x| {
+                    const argb = pixels[y * 160 + x];
+                    const rgb = [3]u8{
+                        @truncate(argb >> 16),
+                        @truncate(argb >> 8),
+                        @truncate(argb),
+                    };
+                    ppm_file.writeAll(&rgb) catch {};
+                }
+            }
+            std.debug.print("Dumped {s}\n", .{fname});
+        }
+
         // Dump diagnostics
         if (false) {
             std.debug.print("Frame {d}: LCDC=0x{x:0>2} BGP=0x{x:0>2} SCY={d} SCX={d} IE=0x{x:0>2} IF=0x{x:0>2} IME={} PC=0x{x:0>4}\n", .{

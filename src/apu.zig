@@ -59,6 +59,14 @@ pub const APU = struct {
         }
     }
 
+    /// True if the next frame sequencer step will NOT clock the length
+    /// counter. Used for the "enable length in first half" quirk.
+    fn firstHalf(self: *const APU) bool {
+        // Length clocks on even steps (0, 2, 4, 6). So if frame_step is
+        // odd, the next execution is a non-length step.
+        return self.frame_step & 1 == 1;
+    }
+
     fn stepFrameSequencer(self: *APU) void {
         // Length counters tick on steps 0, 2, 4, 6 (256 Hz)
         // Sweep ticks on steps 2, 6 (128 Hz)
@@ -159,16 +167,42 @@ pub const APU = struct {
                 if (self.ch4.enabled) v |= 0x08;
                 return v;
             },
-            0xFF30...0xFF3F => return self.wave_ram[addr - 0xFF30],
+            0xFF30...0xFF3F => {
+                // While CH3 is playing, reads return the byte CH3 is
+                // currently accessing (simplified DMG model).
+                if (self.ch3.enabled) return self.wave_ram[self.ch3.sample_position / 2];
+                return self.wave_ram[addr - 0xFF30];
+            },
             else => return 0xFF,
         }
     }
 
     pub fn write(self: *APU, addr: u16, value: u8) void {
-        // When APU is disabled, writes to registers FF10-FF25 are ignored
-        // (but wave RAM and NR52 are still writable).
+        // When APU is disabled, most writes to FF10-FF25 are ignored.
+        // On DMG, the length registers (NR11/21/31/41) are still writable,
+        // and NR52 itself is always writable. Wave RAM is also always writable.
         if (!self.enabled and addr >= 0xFF10 and addr <= 0xFF25) {
-            return;
+            switch (addr) {
+                0xFF11 => {
+                    // NRx1 length-only write: bit duty is writable too but
+                    // doesn't affect sound while disabled.
+                    self.ch1.length_timer = 64 - (value & 0x3F);
+                    return;
+                },
+                0xFF16 => {
+                    self.ch2.length_timer = 64 - (value & 0x3F);
+                    return;
+                },
+                0xFF1B => {
+                    self.ch3.length_timer = 256 - @as(u16, value);
+                    return;
+                },
+                0xFF20 => {
+                    self.ch4.length_timer = 64 - (value & 0x3F);
+                    return;
+                },
+                else => return,
+            }
         }
 
         switch (addr) {
@@ -176,20 +210,20 @@ pub const APU = struct {
             0xFF11 => self.ch1.writeDutyLength(value),
             0xFF12 => self.ch1.writeEnvelope(value),
             0xFF13 => self.ch1.writeFreqLo(value),
-            0xFF14 => self.ch1.writeFreqHi(value),
+            0xFF14 => self.ch1.writeFreqHi(value, self.firstHalf()),
             0xFF16 => self.ch2.writeDutyLength(value),
             0xFF17 => self.ch2.writeEnvelope(value),
             0xFF18 => self.ch2.writeFreqLo(value),
-            0xFF19 => self.ch2.writeFreqHi(value),
+            0xFF19 => self.ch2.writeFreqHi(value, self.firstHalf()),
             0xFF1A => self.ch3.writeDacEnable(value),
             0xFF1B => self.ch3.writeLength(value),
             0xFF1C => self.ch3.writeVolume(value),
             0xFF1D => self.ch3.writeFreqLo(value),
-            0xFF1E => self.ch3.writeFreqHi(value),
+            0xFF1E => self.ch3.writeFreqHi(value, self.firstHalf()),
             0xFF20 => self.ch4.writeLength(value),
             0xFF21 => self.ch4.writeEnvelope(value),
             0xFF22 => self.ch4.writePoly(value),
-            0xFF23 => self.ch4.writeLengthEnable(value),
+            0xFF23 => self.ch4.writeLengthEnable(value, self.firstHalf()),
             0xFF24 => self.nr50 = value,
             0xFF25 => self.nr51 = value,
             0xFF26 => {
@@ -200,17 +234,30 @@ pub const APU = struct {
                     self.frame_step = 0;
                 }
                 if (was_enabled and !self.enabled) {
-                    // Disabling APU clears all registers
-                    self.ch1 = .{ .has_sweep = true };
-                    self.ch2 = .{};
-                    self.ch3 = .{};
-                    self.ch4 = .{};
+                    // Disabling APU clears all registers EXCEPT length counters
+                    // (DMG-specific — length counters are preserved through power off)
+                    const saved_ch1_len = self.ch1.length_timer;
+                    const saved_ch2_len = self.ch2.length_timer;
+                    const saved_ch3_len = self.ch3.length_timer;
+                    const saved_ch4_len = self.ch4.length_timer;
+                    self.ch1 = .{ .has_sweep = true, .length_timer = saved_ch1_len };
+                    self.ch2 = .{ .length_timer = saved_ch2_len };
+                    self.ch3 = .{ .length_timer = saved_ch3_len };
+                    self.ch4 = .{ .length_timer = saved_ch4_len };
                     self.nr50 = 0;
                     self.nr51 = 0;
                     self.frame_step = 0;
                 }
             },
-            0xFF30...0xFF3F => self.wave_ram[addr - 0xFF30] = value,
+            0xFF30...0xFF3F => {
+                // While CH3 is playing, writes are redirected to the byte
+                // CH3 is currently accessing (simplified DMG model).
+                if (self.ch3.enabled) {
+                    self.wave_ram[self.ch3.sample_position / 2] = value;
+                } else {
+                    self.wave_ram[addr - 0xFF30] = value;
+                }
+            },
             else => {},
         }
     }
@@ -296,15 +343,20 @@ const Square = struct {
         if (self.sweep_timer > 0) self.sweep_timer -= 1;
         if (self.sweep_timer == 0) {
             self.sweep_timer = if (self.sweep_period == 0) 8 else self.sweep_period;
-            if (self.sweep_enabled and self.sweep_period != 0) {
+            if (self.sweep_enabled and self.sweep_period > 0) {
                 const new_freq = self.calcSweepFreq();
-                if (new_freq <= 2047 and self.sweep_shift != 0) {
+                // First overflow check: if result > 2047, disable immediately
+                if (new_freq > 2047) {
+                    self.enabled = false;
+                    return;
+                }
+                // Apply only if shift != 0
+                if (self.sweep_shift != 0) {
                     self.frequency = @intCast(new_freq);
                     self.shadow_frequency = new_freq;
-                    // Check again for overflow
+                    // Second overflow check: disable on overflow (but do NOT update)
                     if (self.calcSweepFreq() > 2047) self.enabled = false;
                 }
-                if (new_freq > 2047) self.enabled = false;
             }
         }
     }
@@ -379,10 +431,31 @@ const Square = struct {
     fn readFreqHi(self: *const Square) u8 {
         return 0xBF | (if (self.length_enable) @as(u8, 0x40) else 0);
     }
-    fn writeFreqHi(self: *Square, value: u8) void {
+    fn writeFreqHi(self: *Square, value: u8, first_half: bool) void {
+        const was_enable = self.length_enable;
+        const new_enable = value & 0x40 != 0;
+
         self.frequency = (self.frequency & 0xFF) | (@as(u11, value & 0x07) << 8);
-        self.length_enable = value & 0x40 != 0;
-        if (value & 0x80 != 0) self.trigger();
+
+        // Length enable quirk: enabling length in the first half of a
+        // length period clocks the length counter immediately.
+        if (!was_enable and new_enable and first_half and self.length_timer > 0) {
+            self.length_timer -= 1;
+            if (self.length_timer == 0 and value & 0x80 == 0) {
+                self.enabled = false;
+            }
+        }
+        self.length_enable = new_enable;
+
+        if (value & 0x80 != 0) {
+            const was_zero = self.length_timer == 0;
+            self.trigger();
+            // Trigger quirk: if length reloaded to max and length_enable is
+            // set and we're in first half, clock it immediately.
+            if (was_zero and self.length_enable and first_half) {
+                self.length_timer -= 1;
+            }
+        }
     }
 };
 
@@ -466,10 +539,27 @@ const Wave = struct {
     fn readFreqHi(self: *const Wave) u8 {
         return 0xBF | (if (self.length_enable) @as(u8, 0x40) else 0);
     }
-    fn writeFreqHi(self: *Wave, value: u8) void {
+    fn writeFreqHi(self: *Wave, value: u8, first_half: bool) void {
+        const was_enable = self.length_enable;
+        const new_enable = value & 0x40 != 0;
+
         self.frequency = (self.frequency & 0xFF) | (@as(u11, value & 0x07) << 8);
-        self.length_enable = value & 0x40 != 0;
-        if (value & 0x80 != 0) self.trigger();
+
+        if (!was_enable and new_enable and first_half and self.length_timer > 0) {
+            self.length_timer -= 1;
+            if (self.length_timer == 0 and value & 0x80 == 0) {
+                self.enabled = false;
+            }
+        }
+        self.length_enable = new_enable;
+
+        if (value & 0x80 != 0) {
+            const was_zero = self.length_timer == 0;
+            self.trigger();
+            if (was_zero and self.length_enable and first_half) {
+                self.length_timer -= 1;
+            }
+        }
     }
 };
 
@@ -595,9 +685,25 @@ const Noise = struct {
     fn readLengthEnable(self: *const Noise) u8 {
         return 0xBF | (if (self.length_enable) @as(u8, 0x40) else 0);
     }
-    fn writeLengthEnable(self: *Noise, value: u8) void {
-        self.length_enable = value & 0x40 != 0;
-        if (value & 0x80 != 0) self.trigger();
+    fn writeLengthEnable(self: *Noise, value: u8, first_half: bool) void {
+        const was_enable = self.length_enable;
+        const new_enable = value & 0x40 != 0;
+
+        if (!was_enable and new_enable and first_half and self.length_timer > 0) {
+            self.length_timer -= 1;
+            if (self.length_timer == 0 and value & 0x80 == 0) {
+                self.enabled = false;
+            }
+        }
+        self.length_enable = new_enable;
+
+        if (value & 0x80 != 0) {
+            const was_zero = self.length_timer == 0;
+            self.trigger();
+            if (was_zero and self.length_enable and first_half) {
+                self.length_timer -= 1;
+            }
+        }
     }
 };
 
