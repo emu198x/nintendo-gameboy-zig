@@ -189,13 +189,13 @@ pub const PPU = struct {
                 self.frame_ready = true;
             }
         } else if (self.dot < oam_end) {
-            // Mode 2: OAM scan — collect visible sprites (all at dot 0 for simplicity)
-            if (self.dot == 0) {
-                self.scanOam(vram, oam);
-            }
+            // Mode 2: OAM scan (no-op during mode 2 dots)
         } else {
             if (self.dot == oam_end) {
-                // Entering mode 3: reset pixel pipeline
+                // Entering mode 3: scan OAM now (after mode 2 gave the CPU
+                // time to handle STAT interrupts that change LCDC).
+                self.scanOam(vram, oam);
+                // Reset pixel pipeline
                 self.fetcher.reset();
                 self.fifo.clear();
                 self.lcd_x = 0;

@@ -77,6 +77,41 @@ fn shadeToARGB(shade: u2) u32 {
     return shades[shade];
 }
 
+// -- Headless frame dump -----------------------------------------------
+
+fn runHeadless(gb: *dmg.GameBoy, target_frames: u32) void {
+    var frames: u32 = 0;
+    while (frames < target_frames and !gb.cpu.halted) {
+        gb.ppu.frame_ready = false;
+        while (!gb.ppu.frame_ready) {
+            gb.tick();
+            if (gb.cpu.halted) break;
+        }
+        frames += 1;
+    }
+
+    // Write PPM
+    const file = std.fs.cwd().createFile("screenshot.ppm", .{}) catch |err| {
+        std.debug.print("Could not create screenshot: {}\n", .{err});
+        return;
+    };
+    defer file.close();
+    file.writeAll("P6\n160 144\n255\n") catch {};
+    for (0..144) |y| {
+        for (0..160) |x| {
+            const shade = gb.ppu.framebuffer[y][x];
+            const argb = shadeToARGB(shade);
+            const rgb = [3]u8{
+                @truncate(argb >> 16),
+                @truncate(argb >> 8),
+                @truncate(argb),
+            };
+            file.writeAll(&rgb) catch {};
+        }
+    }
+    std.debug.print("Wrote screenshot.ppm ({d} frames)\n", .{frames});
+}
+
 // -- Main --------------------------------------------------------------
 
 pub fn main() void {
@@ -133,8 +168,20 @@ pub fn main() void {
             gb.loadCartridge(cart_data[0..cart_n]);
             std.debug.print("Loaded {d} byte cartridge\n", .{cart_n});
         }
+        // Check for --screenshot flag
+        if (args.next()) |flag| {
+            if (std.mem.eql(u8, flag, "--screenshot")) {
+                if (args.next()) |n_str| {
+                    const n_frames = std.fmt.parseInt(u32, n_str, 10) catch 600;
+                    runHeadless(&gb, n_frames);
+                } else {
+                    runHeadless(&gb, 600);
+                }
+                return;
+            }
+        }
     } else {
-        std.debug.print("Usage: dmg <boot.bin> [cartridge.gb]\n", .{});
+        std.debug.print("Usage: dmg <boot.bin> [cartridge.gb] [--screenshot N]\n", .{});
         return;
     }
 
