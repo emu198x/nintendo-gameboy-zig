@@ -39,6 +39,7 @@ pub const GameBoy = struct {
 
     t_cycle: u64 = 0,
     cpu_divider: u2 = 0,
+    apu_divider: u1 = 1, // phase-aligned so APU ticks on same T-cycles as CPU
 
     /// Advance the system by one T-cycle.
     /// Timer ticks every T-cycle. CPU ticks every 4th (M-cycle).
@@ -48,7 +49,11 @@ pub const GameBoy = struct {
             self.timer.overflow_pending = false;
             self.interrupt_flag |= 0x04; // timer interrupt (IF bit 2)
         }
-        self.apu.tick(self.timer.counter);
+        // APU runs at 2 MHz (every 2 T-cycles)
+        self.apu_divider +%= 1;
+        if (self.apu_divider == 0) {
+            self.apu.tick(self.timer.counter);
+        }
 
         const was_vblank = self.ppu.ly >= 144;
         const prev_stat_line = self.computeStatLine();

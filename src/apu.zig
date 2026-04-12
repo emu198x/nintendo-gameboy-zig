@@ -22,9 +22,6 @@ pub const APU = struct {
     frame_step: u3 = 0,
     prev_div_bit: bool = false,
 
-    // Wave channel runs at 2 MHz (every 2 T-cycles)
-    wave_divider: u1 = 0,
-
     // Sample output (ring buffer of stereo f32 pairs)
     sample_buffer: [8192]f32 = undefined,
     sample_write_pos: usize = 0,
@@ -33,7 +30,7 @@ pub const APU = struct {
     // Sample rate conversion
     sample_counter: u32 = 0,
 
-    const master_clock: u32 = 4194304;
+    const master_clock: u32 = 2097152; // APU runs at 2 MHz
     pub const sample_rate: u32 = 48000;
 
     /// Advance the APU by one T-cycle. `div_counter` is the timer's
@@ -171,10 +168,12 @@ pub const APU = struct {
                 return v;
             },
             0xFF30...0xFF3F => {
-                // During CH3 playback, reads return the byte at the current
-                // sample position. (Simplified model — real DMG has a 1-cycle
-                // access window, but modeling it requires 2 MHz APU clocking.)
-                if (self.ch3.enabled) return self.wave_ram[self.ch3.sample_position / 2];
+                if (self.ch3.enabled) {
+                    if (self.ch3.wave_just_read) {
+                        return self.wave_ram[self.ch3.sample_position / 2];
+                    }
+                    return 0xFF;
+                }
                 return self.wave_ram[addr - 0xFF30];
             },
             else => return 0xFF,
@@ -255,7 +254,9 @@ pub const APU = struct {
             },
             0xFF30...0xFF3F => {
                 if (self.ch3.enabled) {
-                    self.wave_ram[self.ch3.sample_position / 2] = value;
+                    if (self.ch3.wave_just_read) {
+                        self.wave_ram[self.ch3.sample_position / 2] = value;
+                    }
                 } else {
                     self.wave_ram[addr - 0xFF30] = value;
                 }
@@ -299,7 +300,7 @@ const Square = struct {
 
     fn tick(self: *Square) void {
         if (self.period_timer == 0) {
-            self.period_timer = (2048 - @as(u16, self.frequency)) * 4;
+            self.period_timer = (@as(u16, 2048) - self.frequency) * 2;
             self.duty_position +%= 1;
         } else {
             self.period_timer -= 1;
@@ -374,7 +375,7 @@ const Square = struct {
     fn trigger(self: *Square) void {
         self.enabled = self.dac_enabled;
         if (self.length_timer == 0) self.length_timer = 64;
-        self.period_timer = (2048 - @as(u16, self.frequency)) * 4;
+        self.period_timer = (@as(u16, 2048) - self.frequency) * 2;
         self.envelope_timer = self.envelope_period;
         self.current_volume = self.envelope_initial;
 
@@ -482,20 +483,20 @@ const Wave = struct {
     period_timer: u16 = 0,
     sample_position: u5 = 0, // 0-31 (32 nibbles)
     current_sample: u4 = 0,
-    wave_access_timer: u3 = 0, // counts down from 2; >0 means wave RAM is accessible
+    wave_just_read: bool = false, // true for 1 APU tick (2 T-cycles) after sample fetch
 
     fn tick(self: *Wave, wave_ram: *const [16]u8) void {
-        if (self.wave_access_timer > 0) self.wave_access_timer -= 1;
+        self.wave_just_read = false;
 
         if (self.period_timer == 0) {
-            self.period_timer = (2048 - @as(u16, self.frequency)) * 2;
+            self.period_timer = @as(u16, 2047) - self.frequency;
             self.sample_position +%= 1;
             const byte = wave_ram[self.sample_position / 2];
             self.current_sample = if (self.sample_position & 1 == 0)
                 @truncate(byte >> 4)
             else
                 @truncate(byte & 0x0F);
-            self.wave_access_timer = 2;
+            self.wave_just_read = true;
         } else {
             self.period_timer -= 1;
         }
@@ -538,7 +539,7 @@ const Wave = struct {
 
         self.enabled = self.dac_enabled;
         if (self.length_timer == 0) self.length_timer = 256;
-        self.period_timer = (2048 - @as(u16, self.frequency)) * 2;
+        self.period_timer = @as(u16, 2047) - self.frequency;
         self.sample_position = 0;
     }
 
@@ -634,15 +635,16 @@ const Noise = struct {
     }
 
     fn reloadPeriodTimer(self: *Noise) void {
+        // Divisors halved for 2 MHz APU clock (native values are for 4 MHz)
         const divisor: u32 = switch (self.divisor_code) {
-            0 => 8,
-            1 => 16,
-            2 => 32,
-            3 => 48,
-            4 => 64,
-            5 => 80,
-            6 => 96,
-            7 => 112,
+            0 => 4,
+            1 => 8,
+            2 => 16,
+            3 => 24,
+            4 => 32,
+            5 => 40,
+            6 => 48,
+            7 => 56,
         };
         self.period_timer = divisor << self.clock_shift;
     }
