@@ -313,6 +313,19 @@ pub const PPU = struct {
             self.sprites[self.sprite_count] = s;
             self.sprite_count += 1;
         }
+
+        // DMG priority: lower X coordinate wins. Insertion sort is stable,
+        // so OAM order is preserved as tiebreaker for equal X.
+        var j: u8 = 1;
+        while (j < self.sprite_count) : (j += 1) {
+            const key = self.sprites[j];
+            var k: u8 = j;
+            while (k > 0 and self.sprites[k - 1].x > key.x) {
+                self.sprites[k] = self.sprites[k - 1];
+                k -= 1;
+            }
+            self.sprites[k] = key;
+        }
     }
 
     /// Check if any visible sprite overlaps (lcd_x, ly) and return the final shade.
