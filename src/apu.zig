@@ -22,6 +22,9 @@ pub const APU = struct {
     frame_step: u3 = 0,
     prev_div_bit: bool = false,
 
+    // Wave channel runs at 2 MHz (every 2 T-cycles)
+    wave_divider: u1 = 0,
+
     // Sample output (ring buffer of stereo f32 pairs)
     sample_buffer: [8192]f32 = undefined,
     sample_write_pos: usize = 0,
@@ -168,8 +171,9 @@ pub const APU = struct {
                 return v;
             },
             0xFF30...0xFF3F => {
-                // While CH3 is playing, reads return the byte CH3 is
-                // currently accessing (simplified DMG model).
+                // During CH3 playback, reads return the byte at the current
+                // sample position. (Simplified model — real DMG has a 1-cycle
+                // access window, but modeling it requires 2 MHz APU clocking.)
                 if (self.ch3.enabled) return self.wave_ram[self.ch3.sample_position / 2];
                 return self.wave_ram[addr - 0xFF30];
             },
@@ -219,7 +223,7 @@ pub const APU = struct {
             0xFF1B => self.ch3.writeLength(value),
             0xFF1C => self.ch3.writeVolume(value),
             0xFF1D => self.ch3.writeFreqLo(value),
-            0xFF1E => self.ch3.writeFreqHi(value, self.firstHalf()),
+            0xFF1E => self.ch3.writeFreqHi(value, self.firstHalf(), &self.wave_ram),
             0xFF20 => self.ch4.writeLength(value),
             0xFF21 => self.ch4.writeEnvelope(value),
             0xFF22 => self.ch4.writePoly(value),
@@ -250,8 +254,6 @@ pub const APU = struct {
                 }
             },
             0xFF30...0xFF3F => {
-                // While CH3 is playing, writes are redirected to the byte
-                // CH3 is currently accessing (simplified DMG model).
                 if (self.ch3.enabled) {
                     self.wave_ram[self.ch3.sample_position / 2] = value;
                 } else {
@@ -480,17 +482,20 @@ const Wave = struct {
     period_timer: u16 = 0,
     sample_position: u5 = 0, // 0-31 (32 nibbles)
     current_sample: u4 = 0,
+    wave_access_timer: u3 = 0, // counts down from 2; >0 means wave RAM is accessible
 
     fn tick(self: *Wave, wave_ram: *const [16]u8) void {
+        if (self.wave_access_timer > 0) self.wave_access_timer -= 1;
+
         if (self.period_timer == 0) {
             self.period_timer = (2048 - @as(u16, self.frequency)) * 2;
             self.sample_position +%= 1;
-            // Fetch next sample nibble from wave RAM
             const byte = wave_ram[self.sample_position / 2];
             self.current_sample = if (self.sample_position & 1 == 0)
                 @truncate(byte >> 4)
             else
                 @truncate(byte & 0x0F);
+            self.wave_access_timer = 2;
         } else {
             self.period_timer -= 1;
         }
@@ -515,7 +520,22 @@ const Wave = struct {
         }
     }
 
-    fn trigger(self: *Wave) void {
+    fn trigger(self: *Wave, wave_ram: *[16]u8) void {
+        // DMG wave RAM corruption: re-triggering while active with
+        // the frequency timer about to clock corrupts wave RAM.
+        if (self.enabled and self.period_timer == 0) {
+            const offset: u8 = ((@as(u8, self.sample_position) +% 1) / 2) & 0xF;
+            if (offset < 4) {
+                wave_ram[0] = wave_ram[offset];
+            } else {
+                const src: u8 = offset & 0xFC;
+                wave_ram[0] = wave_ram[src];
+                wave_ram[1] = wave_ram[src + 1];
+                wave_ram[2] = wave_ram[src + 2];
+                wave_ram[3] = wave_ram[src + 3];
+            }
+        }
+
         self.enabled = self.dac_enabled;
         if (self.length_timer == 0) self.length_timer = 256;
         self.period_timer = (2048 - @as(u16, self.frequency)) * 2;
@@ -548,7 +568,7 @@ const Wave = struct {
     fn readFreqHi(self: *const Wave) u8 {
         return 0xBF | (if (self.length_enable) @as(u8, 0x40) else 0);
     }
-    fn writeFreqHi(self: *Wave, value: u8, first_half: bool) void {
+    fn writeFreqHi(self: *Wave, value: u8, first_half: bool, wave_ram: *[16]u8) void {
         const was_enable = self.length_enable;
         const new_enable = value & 0x40 != 0;
 
@@ -564,7 +584,7 @@ const Wave = struct {
 
         if (value & 0x80 != 0) {
             const was_zero = self.length_timer == 0;
-            self.trigger();
+            self.trigger(wave_ram);
             if (was_zero and self.length_enable and first_half) {
                 self.length_timer -= 1;
             }
